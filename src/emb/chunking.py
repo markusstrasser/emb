@@ -104,3 +104,58 @@ def chunk_entries(
                     metadata=child_meta,
                 ))
     return result
+
+
+def multiscale_chunk_entries(
+    entries: List[Entry],
+    scales: List[int],
+    overlap_tokens: int = 50,
+) -> List[Entry]:
+    """Chunk entries at multiple scales for multi-scale indexing.
+
+    Each scale produces its own chunks with metadata.scale tag.
+    Short entries (below smallest scale) appear once without chunking.
+    """
+    result = []
+    seen_short = set()  # track entries that are short enough to skip chunking
+
+    for scale in scales:
+        for entry in entries:
+            words = len(entry.text.split()) if entry.text else 0
+            if words <= min(scales):
+                # Short entry — only add once (not per scale)
+                if entry.id not in seen_short:
+                    seen_short.add(entry.id)
+                    result.append(entry)
+                continue
+
+            chunks = chunk_text(entry.text, chunk_tokens=scale, overlap_tokens=overlap_tokens)
+            if len(chunks) == 1:
+                # Fits in this scale — add with scale tag
+                child_meta = dict(entry.metadata)
+                child_meta["scale"] = scale
+                result.append(Entry(
+                    id=f"{entry.id}__s{scale}",
+                    text=entry.text,
+                    source=entry.source,
+                    title=entry.title,
+                    date=entry.date,
+                    metadata=child_meta,
+                ))
+            else:
+                for i, chunk_str in enumerate(chunks):
+                    child_meta = dict(entry.metadata)
+                    child_meta["parent_id"] = entry.id
+                    child_meta["chunk_index"] = i
+                    child_meta["total_chunks"] = len(chunks)
+                    child_meta["scale"] = scale
+                    result.append(Entry(
+                        id=f"{entry.id}__s{scale}_chunk_{i}",
+                        text=chunk_str,
+                        source=entry.source,
+                        title=f"{entry.title} (s{scale} part {i+1}/{len(chunks)})" if entry.title else None,
+                        date=entry.date,
+                        metadata=child_meta,
+                    ))
+
+    return result

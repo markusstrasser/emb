@@ -32,12 +32,13 @@ def embed(
     chunk_tokens: int = typer.Option(500, "--chunk-tokens", help="Words per chunk"),
     overlap_tokens: int = typer.Option(50, "--overlap-tokens", help="Overlap words between chunks"),
     force: bool = typer.Option(False, "--force", help="Force re-embed all (ignore cache)"),
+    scales: str = typer.Option(None, "--scales", help="Multi-scale chunk sizes, comma-separated (e.g. '200,500')"),
 ):
     """Embed entries from JSONL into a searchable index."""
     from emb.io import read_jsonl
     from emb.embed import EmbeddingEngine
     from emb.cache import EmbeddingCache
-    from emb.chunking import chunk_entries
+    from emb.chunking import chunk_entries, multiscale_chunk_entries
     from datetime import datetime
 
     # Read input
@@ -49,7 +50,12 @@ def embed(
     console.print(f"  Loaded {len(entries)} entries")
 
     # Chunk if requested
-    if chunk:
+    if scales:
+        scale_list = [int(s.strip()) for s in scales.split(',')]
+        before = len(entries)
+        entries = multiscale_chunk_entries(entries, scales=scale_list, overlap_tokens=overlap_tokens)
+        console.print(f"  Multi-scale chunked ({scale_list}): {before} -> {len(entries)} entries")
+    elif chunk:
         before = len(entries)
         entries = chunk_entries(entries, chunk_tokens=chunk_tokens, overlap_tokens=overlap_tokens)
         console.print(f"  Chunked: {before} -> {len(entries)} entries")
