@@ -231,6 +231,26 @@ def _display_results(results, detailed=False):
 
 
 @app.command()
+def contextualize(
+    input_file: str = typer.Argument(..., help="JSONL input file"),
+    output_file: str = typer.Argument(..., help="JSONL output file"),
+    model: str = typer.Option("gemini/gemini-2.0-flash", "--model", "-m", help="LLM model (litellm format)"),
+    concurrency: int = typer.Option(10, "--concurrency", "-c", help="Max parallel LLM calls"),
+):
+    """Add LLM-generated context to entries (Anthropic's Contextual Retrieval)."""
+    from emb.io import read_jsonl, write_jsonl
+    from emb.contextualize import contextualize_sync
+
+    entries = read_jsonl(input_file)
+    console.print(f"  Loaded {len(entries)} entries")
+
+    results = contextualize_sync(entries, model=model, concurrency=concurrency)
+
+    count = write_jsonl(results, output_file)
+    console.print(f"  Written {count} entries to {output_file}")
+
+
+@app.command()
 def info(
     index_file: Path = typer.Argument(..., help="Index JSON file"),
 ):
