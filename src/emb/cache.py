@@ -63,7 +63,7 @@ class EmbeddingCache:
 
     @classmethod
     def load(cls, cache_dir: Path, dim: int) -> "EmbeddingCache":
-        """Load cache from disk. Returns empty cache if files don't exist."""
+        """Load cache from disk. Returns empty cache if files don't exist or dim mismatches."""
         cache = cls(dim=dim)
         cache_dir = Path(cache_dir)
 
@@ -76,6 +76,17 @@ class EmbeddingCache:
         try:
             with open(idx_path, "r") as f:
                 idx_data = json.load(f)
+
+            cached_dim = idx_data.get("dim")
+            if cached_dim is not None and cached_dim != dim:
+                import sys
+                print(
+                    f"  Warning: cache dim={cached_dim} != model dim={dim}. "
+                    f"Ignoring stale cache (re-embedding all).",
+                    file=sys.stderr,
+                )
+                return cache
+
             vectors = np.load(vec_path)
             cache.vectors = list(vectors)
             cache.hash_to_idx = {

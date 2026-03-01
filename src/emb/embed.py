@@ -58,7 +58,17 @@ class EmbeddingEngine:
 
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
         """Embed a batch of texts. Returns normalized embeddings."""
-        truncated = [t[:self.max_chars] for t in texts]
+        truncated = []
+        n_truncated = 0
+        for t in texts:
+            if len(t) > self.max_chars:
+                truncated.append(t[:self.max_chars])
+                n_truncated += 1
+            else:
+                truncated.append(t)
+        if n_truncated:
+            import sys
+            print(f"  Warning: {n_truncated} text(s) truncated to {self.max_chars} chars", file=sys.stderr)
         if self.backend == 'ollama':
             return self._embed_ollama(truncated)
         return self._embed_st(truncated)
