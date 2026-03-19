@@ -4,7 +4,7 @@ import math
 import sqlite3
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Set, Optional, Tuple
+from typing import List, Dict, Set, Optional, Tuple, Callable
 from datetime import datetime
 from dateutil import parser as date_parser
 from emb.schema import Entry
@@ -13,19 +13,106 @@ RRF_K = 60  # Reciprocal Rank Fusion constant
 DEFAULT_RERANKER = 'tomaarsen/Qwen3-Reranker-0.6B-seq-cls'
 
 
+def expand_sources(sources: Set[str], groups: Dict[str, Set[str]]) -> Set[str]:
+    """Expand source group aliases. e.g. {'health'} + groups → {'research','docs','healthkit'}"""
+    expanded = set()
+    for s in sources:
+        if s in groups:
+            expanded.update(groups[s])
+        else:
+            expanded.add(s)
+    return expanded
+
+
+class NeighborIndex:
+    """Generic spreading activation for structural neighbors.
+
+    The mechanism is generic — callers provide a key_extractor function that maps
+    entries to relation keys (e.g. 'chatgpt_conv:abc123', 'git_repo:myrepo').
+    """
+
+    def __init__(self, entries: List[Entry], key_extractor: Callable):
+        """Build index. key_extractor(entry) -> List[str] of relation keys."""
+        self._index: Dict[str, List[int]] = {}
+        for i, entry in enumerate(entries):
+            for key in key_extractor(entry):
+                self._index.setdefault(key, []).append(i)
+        self._key_extractor = key_extractor
+
+    def expand(self, anchor_indices: List[int], entries: List[Entry],
+               valid_indices: Set[int], max_neighbors: int = 30) -> Set[int]:
+        """Find structural neighbors of anchors within valid_indices."""
+        neighbor_set: Set[int] = set()
+        anchor_set = set(anchor_indices)
+
+        for idx in anchor_indices:
+            entry = entries[idx]
+            for key in self._key_extractor(entry):
+                for n_idx in self._index.get(key, []):
+                    if n_idx not in anchor_set and n_idx in valid_indices:
+                        neighbor_set.add(n_idx)
+            if len(neighbor_set) >= max_neighbors:
+                break
+
+        return neighbor_set
+
+    def as_post_processor(self, entries: List[Entry], boost_weight: float = 0.3):
+        """Return a post_processor callable for SearchEngine.search()."""
+        def _spread(query: str, results: List[dict], valid_indices: Set[int]) -> List[dict]:
+            anchor_count = min(10, len(results))
+            anchor_indices = [r['idx'] for r in results[:anchor_count]]
+            neighbor_indices = self.expand(anchor_indices, entries, valid_indices)
+
+            if not neighbor_indices:
+                return results
+
+            anchor_avg_score = sum(
+                r['score'] for r in results[:anchor_count]
+            ) / max(anchor_count, 1)
+            anchor_set = set(anchor_indices)
+
+            for r in results:
+                if r['idx'] in neighbor_indices and r['idx'] not in anchor_set:
+                    old_score = r['score']
+                    r['score'] = old_score * (1 - boost_weight) + anchor_avg_score * boost_weight
+                    r['_expanded'] = True
+
+            results.sort(key=lambda x: x['score'], reverse=True)
+            return results
+
+        return _spread
+
+
 class SearchEngine:
     """Semantic search over an emb index."""
 
-    def __init__(self, index_path: Path):
+    def __init__(self, index_path: Path, source_half_lives: Optional[Dict[str, Optional[float]]] = None):
         index_path = Path(index_path)
         with open(index_path, 'r') as f:
             data = json.load(f)
 
-        self.metadata = data.get('metadata', {})
-        self.entries = [Entry.from_dict(e) for e in data['entries']]
-        self.embeddings = np.array(
-            [e.embedding for e in self.entries], dtype=np.float32
+        entries = [Entry.from_dict(e) for e in data['entries']]
+        embeddings = np.array(
+            [e.embedding for e in entries], dtype=np.float32
         )
+        metadata = data.get('metadata', {})
+        self._init_common(entries, embeddings, metadata, source_half_lives)
+
+    @classmethod
+    def from_data(cls, entries: List[Entry], embeddings: np.ndarray,
+                  metadata: Optional[Dict] = None,
+                  source_half_lives: Optional[Dict[str, Optional[float]]] = None) -> 'SearchEngine':
+        """Create from pre-loaded data. entries: List[Entry], embeddings: np.ndarray."""
+        engine = object.__new__(cls)
+        engine._init_common(entries, embeddings, metadata or {}, source_half_lives)
+        return engine
+
+    def _init_common(self, entries: List[Entry], embeddings: np.ndarray,
+                     metadata: Dict, source_half_lives: Optional[Dict[str, Optional[float]]] = None):
+        self.entries = entries
+        self.embeddings = embeddings
+        self.metadata = metadata
+        self._source_half_lives = source_half_lives
 
         # Pre-parse dates
         self._parsed_dates = []
@@ -80,11 +167,23 @@ class SearchEngine:
 
     @staticmethod
     def _fts5_safe_query(query: str) -> str:
-        """Quote tokens for FTS5 MATCH safety."""
+        """Make a query safe for FTS5 MATCH, preserving AND/OR/NOT operators."""
         tokens = query.split()
         if not tokens:
             return ''
-        return ' '.join(f'"{t}"' for t in tokens if t.strip())
+        FTS5_OPERATORS = {'AND', 'OR', 'NOT'}
+        FTS5_SPECIAL = set('"*^:{}()[]')
+        safe_tokens = []
+        for t in tokens:
+            if not t.strip():
+                continue
+            if t in FTS5_OPERATORS:
+                safe_tokens.append(t)
+            else:
+                cleaned = ''.join(c for c in t if c not in FTS5_SPECIAL)
+                if cleaned:
+                    safe_tokens.append(f'"{cleaned}"')
+        return ' '.join(safe_tokens)
 
     def _bm25_search(self, query: str, limit: int = 200) -> List[Tuple[int, float]]:
         """BM25 search via FTS5. Returns (index, score) tuples."""
@@ -109,7 +208,8 @@ class SearchEngine:
             self._reranker = CrossEncoder(model)
         return self._reranker
 
-    def _rerank(self, query: str, candidates: List[dict], top_k: int) -> List[dict]:
+    def _rerank(self, query: str, candidates: List[dict], top_k: int,
+                provenance: bool = False) -> List[dict]:
         """Rerank candidates with cross-encoder."""
         reranker = self._get_reranker()
         instruction = 'Given a web search query, retrieve relevant passages that answer the query.'
@@ -122,7 +222,16 @@ class SearchEngine:
         scores = reranker.predict(pairs)
         for i, c in enumerate(candidates):
             c['rerank_score'] = float(scores[i])
+            if provenance and 'provenance' in c:
+                c['provenance']['pre_rerank_rank'] = i
+                c['provenance']['rerank_score'] = round(float(scores[i]), 4)
         candidates.sort(key=lambda x: x['rerank_score'], reverse=True)
+        if provenance:
+            for rank, c in enumerate(candidates[:top_k]):
+                if 'provenance' in c:
+                    pre = c['provenance'].get('pre_rerank_rank', rank)
+                    c['provenance']['post_rerank_rank'] = rank
+                    c['provenance']['rerank_delta'] = pre - rank
         return candidates[:top_k]
 
     def _compute_freshness(
@@ -142,17 +251,20 @@ class SearchEngine:
             return 1.0
         return math.pow(0.5, age / half_life_days)
 
-    def _deduplicate_chunks(self, results: List[dict], top_k: int) -> List[dict]:
-        """Group by parent_id, keep best score per parent."""
+    def _deduplicate(self, results: List[dict], top_k: int,
+                     dedup_key: Optional[Callable] = None) -> List[dict]:
+        """Deduplicate results. Default: by parent_id. Custom: by dedup_key callable."""
+        if dedup_key is None:
+            dedup_key = lambda r: r['entry'].metadata.get('parent_id')
+
         deduped = []
-        seen_parents = {}
+        seen_keys = {}
         for r in results:
-            meta = r['entry'].metadata
-            parent_id = meta.get('parent_id')
-            if parent_id is None:
+            key = dedup_key(r)
+            if key is None:
                 deduped.append(r)
-            elif parent_id not in seen_parents:
-                seen_parents[parent_id] = r
+            elif key not in seen_keys:
+                seen_keys[key] = r
                 deduped.append(r)
         return deduped[:top_k]
 
@@ -168,11 +280,30 @@ class SearchEngine:
         source_half_lives: Optional[Dict[str, Optional[float]]] = None,
         hybrid: bool = False,
         rerank: bool = False,
+        # Extension points
+        entry_filter: Optional[Callable] = None,
+        dedup_key: Optional[Callable] = None,
+        post_processors: Optional[List[Callable]] = None,
+        provenance: bool = False,
     ) -> List[dict]:
         """Search the index.
 
+        Args:
+            entry_filter: Optional callable(entry) -> bool for custom filtering.
+            dedup_key: Optional callable(result_dict) -> Optional[str] for dedup grouping.
+            post_processors: List of callable(query, results, valid_indices) -> results.
+            provenance: If True, attach per-result provenance dict with scoring details.
+
         Returns list of dicts with: id, source, title, date, text, similarity, metadata
         """
+        # Merge constructor-level and call-level half-lives
+        effective_half_lives = self._source_half_lives
+        if source_half_lives is not None:
+            if effective_half_lives:
+                effective_half_lives = {**effective_half_lives, **source_half_lives}
+            else:
+                effective_half_lives = source_half_lives
+
         query_emb = self._encode_query(query)
         sims = self.embeddings @ query_emb
 
@@ -180,6 +311,8 @@ class SearchEngine:
         valid = set()
         for i, entry in enumerate(self.entries):
             if sources and entry.source not in sources:
+                continue
+            if entry_filter and not entry_filter(entry):
                 continue
             if min_similarity > 0 and float(sims[i]) < min_similarity:
                 continue
@@ -208,21 +341,40 @@ class SearchEngine:
             sim = float(sims[i])
 
             if hybrid:
-                score = 1.0 / (RRF_K + dense_ranks[i])
+                base_score = 1.0 / (RRF_K + dense_ranks[i])
                 if i in bm25_ranks:
-                    score += 1.0 / (RRF_K + bm25_ranks[i])
+                    base_score += 1.0 / (RRF_K + bm25_ranks[i])
             else:
-                score = sim
+                base_score = sim
 
+            freshness = None
             if freshness_weight > 0:
                 freshness = self._compute_freshness(
-                    self._parsed_dates[i], entry.source, source_half_lives=source_half_lives
+                    self._parsed_dates[i], entry.source, source_half_lives=effective_half_lives
                 )
-                score = score * (1 - freshness_weight + freshness_weight * freshness)
+                score = base_score * (1 - freshness_weight + freshness_weight * freshness)
+            else:
+                score = base_score
 
-            results.append({
-                'idx': i, 'entry': entry, 'similarity': sim, 'score': score,
-            })
+            r = {'idx': i, 'entry': entry, 'similarity': sim, 'score': score}
+
+            if provenance:
+                prov = {
+                    'dense_sim': round(sim, 4),
+                    'dense_rank': dense_ranks[i],
+                }
+                if hybrid:
+                    prov['bm25_rank'] = bm25_ranks.get(i)
+                    prov['rrf_dense'] = round(1.0 / (RRF_K + dense_ranks[i]), 6)
+                    prov['rrf_bm25'] = round(
+                        1.0 / (RRF_K + bm25_ranks[i]) if i in bm25_ranks else 0.0, 6
+                    )
+                    prov['rrf_total'] = round(base_score, 6)
+                if freshness is not None:
+                    prov['freshness_factor'] = round(freshness, 4)
+                r['provenance'] = prov
+
+            results.append(r)
 
         # Sort
         if sort_by == 'date':
@@ -230,12 +382,17 @@ class SearchEngine:
         else:
             results.sort(key=lambda x: x['score'], reverse=True)
 
-        # Chunk dedup + rerank pool
+        # Post-processors (e.g. spreading activation)
+        if post_processors:
+            for proc in post_processors:
+                results = proc(query, results, valid)
+
+        # Dedup + rerank pool
         pool_size = top_k * 3 if rerank else top_k
-        results = self._deduplicate_chunks(results, pool_size)
+        results = self._deduplicate(results, pool_size, dedup_key=dedup_key)
 
         if rerank and results:
-            results = self._rerank(query, results, top_k)
+            results = self._rerank(query, results, top_k, provenance=provenance)
 
         results = results[:top_k]
 
@@ -248,6 +405,8 @@ class SearchEngine:
                 'date': e.date, 'text': e.text[:300],
                 'similarity': r['similarity'], 'metadata': e.metadata,
             }
+            if provenance and 'provenance' in r:
+                out['provenance'] = r['provenance']
             if 'rerank_score' in r:
                 out['rerank_score'] = r['rerank_score']
             formatted.append(out)

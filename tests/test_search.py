@@ -433,3 +433,202 @@ def test_source_half_lives(tmp_path):
     # book_old with freshness=1.0 should beat git_old with heavy decay
     ids = [r['id'] for r in results]
     assert ids.index('book_old') < ids.index('git_old')
+
+
+# ── Phase 1: from_data ──────────────────────────────────────
+
+def test_from_data_basic(tmp_path):
+    """SearchEngine.from_data should produce identical results to file-loaded."""
+    from emb.schema import Entry as E
+    entries = [
+        E(id='a', text='hello world', source='test', embedding=[1, 0, 0, 0]),
+        E(id='b', text='foo bar', source='test', embedding=[0, 0, 0, 1]),
+    ]
+    embeddings = np.array([e.embedding for e in entries], dtype=np.float32)
+    # Normalize
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    embeddings = embeddings / norms
+
+    engine = SearchEngine.from_data(entries, embeddings, {'embedding_model': 'test'})
+    engine._encode_query = lambda q: np.array([1, 0, 0, 0], dtype=np.float32)
+
+    results = engine.search("test")
+    assert len(results) == 2
+    assert results[0]['id'] == 'a'
+
+
+def test_from_data_matches_file_loaded(tmp_path):
+    """from_data and file-loaded should return identical results."""
+    entries_data = [
+        {'id': 'x', 'text': 'alpha beta', 'source': 's1', 'embedding': [0.9, 0.1, 0, 0]},
+        {'id': 'y', 'text': 'gamma delta', 'source': 's2', 'embedding': [0, 0.1, 0.9, 0]},
+    ]
+    path = _make_index(entries_data, tmp_path)
+    file_engine = SearchEngine(path)
+
+    from emb.schema import Entry as E
+    entries = [E.from_dict(e) for e in entries_data]
+    for e, d in zip(entries, entries_data):
+        arr = np.array(d['embedding'], dtype=np.float32)
+        e.embedding = (arr / np.linalg.norm(arr)).tolist()
+    embeddings = np.array([e.embedding for e in entries], dtype=np.float32)
+
+    data_engine = SearchEngine.from_data(entries, embeddings, {'embedding_model': 'test-model'})
+
+    qvec = np.array([1, 0, 0, 0], dtype=np.float32)
+    file_engine._encode_query = lambda q: qvec
+    data_engine._encode_query = lambda q: qvec
+
+    r1 = file_engine.search("test")
+    r2 = data_engine.search("test")
+    assert [r['id'] for r in r1] == [r['id'] for r in r2]
+
+
+def test_from_data_with_source_half_lives():
+    """Constructor-level source_half_lives should be used in search."""
+    from emb.schema import Entry as E
+    entries = [
+        E(id='a', text='new git', source='git', date=datetime.now().strftime('%Y-%m-%d'),
+          embedding=[0.5, 0.5, 0, 0]),
+        E(id='b', text='old git', source='git',
+          date=(datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d'),
+          embedding=[0.5, 0.5, 0, 0]),
+    ]
+    embeddings = np.array([e.embedding for e in entries], dtype=np.float32)
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    embeddings = embeddings / norms
+
+    engine = SearchEngine.from_data(
+        entries, embeddings, {},
+        source_half_lives={'git': 7}  # 7-day half-life
+    )
+    engine._encode_query = lambda q: np.array([0.5, 0.5, 0, 0], dtype=np.float32) / np.linalg.norm([0.5, 0.5, 0, 0])
+
+    results = engine.search("test", freshness_weight=0.9)
+    assert results[0]['id'] == 'a'
+
+
+# ── Phase 2: Extension points ───────────────────────────────
+
+def test_entry_filter(tmp_path):
+    """entry_filter should restrict results."""
+    path = _make_index([
+        {'id': 'a', 'text': 'hello', 'source': 'x', 'metadata': {'channel': 'authored'}},
+        {'id': 'b', 'text': 'world', 'source': 'y', 'metadata': {'channel': 'exhaust'}},
+    ], tmp_path)
+    engine = SearchEngine(path)
+    engine._encode_query = lambda q: np.random.randn(4).astype(np.float32)
+
+    results = engine.search("test", entry_filter=lambda e: e.metadata.get('channel') == 'authored')
+    assert len(results) == 1
+    assert results[0]['id'] == 'a'
+
+
+def test_dedup_key(tmp_path):
+    """Custom dedup_key should group results."""
+    path = _make_index([
+        {'id': 'ep1_c0', 'text': 'chunk 0', 'source': 'podcast', 'embedding': [1, 0, 0, 0],
+         'metadata': {'video_id': 'ep1'}},
+        {'id': 'ep1_c1', 'text': 'chunk 1', 'source': 'podcast', 'embedding': [0.9, 0.1, 0, 0],
+         'metadata': {'video_id': 'ep1'}},
+        {'id': 'ep2_c0', 'text': 'other', 'source': 'podcast', 'embedding': [0.5, 0.5, 0, 0],
+         'metadata': {'video_id': 'ep2'}},
+    ], tmp_path)
+    engine = SearchEngine(path)
+    engine._encode_query = lambda q: np.array([1, 0, 0, 0], dtype=np.float32)
+
+    results = engine.search(
+        "test",
+        dedup_key=lambda r: r['entry'].metadata.get('video_id'),
+    )
+    video_ids = [r['metadata'].get('video_id') for r in results]
+    assert video_ids.count('ep1') == 1
+
+
+def test_provenance(tmp_path):
+    """provenance=True should attach scoring details."""
+    path = _make_index([
+        {'id': 'a', 'text': 'hello', 'embedding': [1, 0, 0, 0]},
+        {'id': 'b', 'text': 'world', 'embedding': [0, 1, 0, 0]},
+    ], tmp_path)
+    engine = SearchEngine(path)
+    engine._encode_query = lambda q: np.array([1, 0, 0, 0], dtype=np.float32)
+
+    results = engine.search("test", provenance=True)
+    assert 'provenance' in results[0]
+    prov = results[0]['provenance']
+    assert 'dense_sim' in prov
+    assert 'dense_rank' in prov
+    assert prov['dense_rank'] == 0  # top result
+
+    # Without provenance
+    results2 = engine.search("test", provenance=False)
+    assert 'provenance' not in results2[0]
+
+
+def test_provenance_hybrid(tmp_path):
+    """Hybrid provenance should include BM25 fields."""
+    path = _make_index([
+        {'id': 'a', 'text': 'machine learning', 'embedding': [1, 0, 0, 0]},
+        {'id': 'b', 'text': 'cooking pasta', 'embedding': [0, 1, 0, 0]},
+    ], tmp_path)
+    engine = SearchEngine(path)
+    engine._encode_query = lambda q: np.array([1, 0, 0, 0], dtype=np.float32)
+
+    results = engine.search("machine learning", hybrid=True, provenance=True)
+    prov = results[0]['provenance']
+    assert 'rrf_dense' in prov
+    assert 'rrf_total' in prov
+
+
+def test_post_processor(tmp_path):
+    """Post-processors should modify result ordering."""
+    path = _make_index([
+        {'id': 'a', 'text': 'alpha', 'embedding': [1, 0, 0, 0]},
+        {'id': 'b', 'text': 'beta', 'embedding': [0, 1, 0, 0]},
+    ], tmp_path)
+    engine = SearchEngine(path)
+    engine._encode_query = lambda q: np.array([1, 0, 0, 0], dtype=np.float32)
+
+    # Post-processor that reverses order
+    def reverse_proc(query, results, valid):
+        results.reverse()
+        return results
+
+    results = engine.search("test", post_processors=[reverse_proc])
+    assert results[0]['id'] == 'b'  # reversed
+
+
+def test_fts5_preserves_operators():
+    """FTS5 safe query should preserve AND/OR/NOT."""
+    assert 'AND' in SearchEngine._fts5_safe_query('python AND machine')
+    assert 'OR' in SearchEngine._fts5_safe_query('cat OR dog')
+    assert 'NOT' in SearchEngine._fts5_safe_query('good NOT bad')
+    # Regular words should be quoted
+    result = SearchEngine._fts5_safe_query('hello world')
+    assert '"hello"' in result
+    assert '"world"' in result
+
+
+def test_expand_sources():
+    """expand_sources should expand group aliases."""
+    from emb.search import expand_sources
+    groups = {'health': {'research', 'docs'}, 'code': {'git'}}
+    assert expand_sources({'health'}, groups) == {'research', 'docs'}
+    assert expand_sources({'health', 'git'}, groups) == {'research', 'docs', 'git'}
+    assert expand_sources({'unknown'}, groups) == {'unknown'}
+
+
+def test_neighbor_index_basic():
+    """NeighborIndex should find structural neighbors."""
+    from emb.search import NeighborIndex
+    from emb.schema import Entry as E
+    entries = [
+        E(id='a', text='x', metadata={'conv': 'c1'}),
+        E(id='b', text='y', metadata={'conv': 'c1'}),
+        E(id='c', text='z', metadata={'conv': 'c2'}),
+    ]
+    idx = NeighborIndex(entries, key_extractor=lambda e: [f"conv:{e.metadata.get('conv')}"])
+    neighbors = idx.expand([0], entries, {0, 1, 2})
+    assert 1 in neighbors  # same conv
+    assert 2 not in neighbors  # different conv
