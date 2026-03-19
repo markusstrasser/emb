@@ -13,7 +13,9 @@ def test_version():
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert "emb" in result.output
-    assert "0.1.0" in result.output
+    # Dynamic version — just check it's present and parseable
+    import re
+    assert re.search(r'\d+\.\d+', result.output)
 
 
 def test_no_command_shows_help():
