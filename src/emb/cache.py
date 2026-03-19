@@ -16,7 +16,8 @@ class EmbeddingCache:
     def __init__(self, dim: int):
         self.dim = dim
         self.hash_to_idx: Dict[str, int] = {}
-        self.vectors: List[List[float]] = []
+        self._vectors: np.ndarray = np.empty((0, dim), dtype=np.float32)
+        self._overflow: List[np.ndarray] = []  # pending rows not yet in _vectors
 
     def __len__(self):
         return len(self.hash_to_idx)
@@ -24,18 +25,36 @@ class EmbeddingCache:
     def __contains__(self, content_hash: str):
         return content_hash in self.hash_to_idx
 
+    def _consolidate(self):
+        """Merge overflow rows into main array."""
+        if not self._overflow:
+            return
+        parts = [self._vectors] + self._overflow if len(self._vectors) > 0 else self._overflow
+        self._vectors = np.concatenate(parts, dtype=np.float32)
+        self._overflow.clear()
+
     def get(self, content_hash: str) -> Optional[List[float]]:
         idx = self.hash_to_idx.get(content_hash)
         if idx is None:
             return None
-        v = self.vectors[idx]
-        return v.tolist() if hasattr(v, "tolist") else list(v)
+        total_main = len(self._vectors)
+        if idx < total_main:
+            return self._vectors[idx].tolist()
+        # In overflow
+        overflow_idx = idx - total_main
+        offset = 0
+        for arr in self._overflow:
+            if overflow_idx < offset + len(arr):
+                return arr[overflow_idx - offset].tolist()
+            offset += len(arr)
+        return None
 
-    def put(self, content_hash: str, embedding: List[float]):
+    def put(self, content_hash: str, embedding):
         if content_hash in self.hash_to_idx:
             return
-        idx = len(self.vectors)
-        self.vectors.append(embedding)
+        idx = len(self._vectors) + sum(len(a) for a in self._overflow)
+        vec = np.array(embedding, dtype=np.float32).reshape(1, -1)
+        self._overflow.append(vec)
         self.hash_to_idx[content_hash] = idx
 
     def save(self, cache_dir: Path):
@@ -43,11 +62,8 @@ class EmbeddingCache:
         cache_dir = Path(cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        arr = (
-            np.array(self.vectors, dtype=np.float32)
-            if self.vectors
-            else np.empty((0, self.dim), dtype=np.float32)
-        )
+        self._consolidate()
+        arr = self._vectors if len(self._vectors) > 0 else np.empty((0, self.dim), dtype=np.float32)
         np.save(cache_dir / "vectors.npy", arr)
 
         with open(cache_dir / "index.json", "w") as f:
@@ -88,7 +104,7 @@ class EmbeddingCache:
                 return cache
 
             vectors = np.load(vec_path)
-            cache.vectors = list(vectors)
+            cache._vectors = vectors.astype(np.float32)
             cache.hash_to_idx = {
                 h: int(i) for h, i in idx_data["hashes"].items()
             }

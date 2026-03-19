@@ -21,7 +21,7 @@ DEFAULT_MODEL = 'Alibaba-NLP/gte-modernbert-base'
 
 def compute_content_hash(text: str) -> str:
     """Compute MD5 hash of text for cache keys."""
-    return hashlib.md5(text.encode('utf-8')).hexdigest()[:12]
+    return hashlib.md5(text.encode('utf-8')).hexdigest()
 
 
 class EmbeddingEngine:
@@ -98,7 +98,7 @@ class EmbeddingEngine:
 
     def _embed_adaptive(self, texts: List[str]) -> List[List[float]]:
         """Embed with adaptive batch halving on OOM."""
-        size = max(1, len(texts) // 2)
+        size = self.batch_size
         while size > 1:
             try:
                 results = []

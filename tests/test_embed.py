@@ -11,7 +11,7 @@ def test_compute_content_hash():
     h3 = compute_content_hash("different text")
     assert h1 == h2
     assert h1 != h3
-    assert len(h1) == 12
+    assert len(h1) == 32
 
 def test_engine_defaults():
     engine = EmbeddingEngine()
