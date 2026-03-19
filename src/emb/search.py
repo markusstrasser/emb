@@ -143,6 +143,10 @@ class SearchEngine:
     def _encode_query(self, query: str) -> np.ndarray:
         """Encode query string to embedding vector."""
         if self._embedding_model is None:
+            from emb.embed import _model_is_cached, _confirm_model_download
+            if not _model_is_cached(self._model_name):
+                if not _confirm_model_download(self._model_name):
+                    raise SystemExit("Model download declined.")
             from sentence_transformers import SentenceTransformer
             self._embedding_model = SentenceTransformer(
                 self._model_name, trust_remote_code=True

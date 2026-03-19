@@ -19,6 +19,29 @@ KNOWN_MODELS = {
 DEFAULT_MODEL = 'Alibaba-NLP/gte-modernbert-base'
 
 
+def _model_is_cached(model_name: str) -> bool:
+    """Check if a sentence-transformers model is already downloaded."""
+    from pathlib import Path
+    cache_dir = Path.home() / '.cache' / 'huggingface' / 'hub'
+    if not cache_dir.exists():
+        return False
+    # HF cache uses models--org--name format
+    slug = 'models--' + model_name.replace('/', '--')
+    return (cache_dir / slug).exists()
+
+
+def _confirm_model_download(model_name: str) -> bool:
+    """Ask user to confirm model download. Returns True if confirmed or non-interactive."""
+    import sys
+    if not sys.stdin.isatty():
+        return True  # non-interactive: proceed silently
+    try:
+        resp = input(f"Model '{model_name}' not found locally. Download it? [Y/n] ").strip().lower()
+        return resp in ('', 'y', 'yes')
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
 def compute_content_hash(text: str) -> str:
     """Compute MD5 hash of text for cache keys."""
     return hashlib.md5(text.encode('utf-8')).hexdigest()
@@ -46,8 +69,11 @@ class EmbeddingEngine:
         self._st_model = None  # lazy
 
     def _get_st_model(self):
-        """Lazy-load sentence-transformers model."""
+        """Lazy-load sentence-transformers model, confirming download if needed."""
         if self._st_model is None:
+            if not _model_is_cached(self.model):
+                if not _confirm_model_download(self.model):
+                    raise SystemExit("Model download declined.")
             import os
             os.environ['TOKENIZERS_PARALLELISM'] = 'true'
             os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.0'
