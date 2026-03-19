@@ -26,15 +26,17 @@ def version():
 @app.command()
 def embed(
     input_file: str = typer.Argument(..., help="JSONL input file (or '-' for stdin)"),
-    output: Path = typer.Option(..., "--output", "-o", help="Output index JSON path"),
+    output: Path = typer.Option(..., "--output", "-o", help="Output path (directory for split, file for json)"),
     model: str = typer.Option("Alibaba-NLP/gte-modernbert-base", "--model", "-m", help="Embedding model"),
     chunk: bool = typer.Option(False, "--chunk", help="Enable sentence-aware chunking"),
     chunk_tokens: int = typer.Option(500, "--chunk-tokens", help="Words per chunk"),
     overlap_tokens: int = typer.Option(50, "--overlap-tokens", help="Overlap words between chunks"),
     force: bool = typer.Option(False, "--force", help="Force re-embed all (ignore cache)"),
     scales: str = typer.Option(None, "--scales", help="Multi-scale chunk sizes, comma-separated (e.g. '200,500')"),
+    fmt: str = typer.Option("split", "--format", "-f", help="Output format: split (directory) or json"),
 ):
     """Embed entries from JSONL into a searchable index."""
+    import numpy as np
     from emb.io import read_jsonl
     from emb.embed import EmbeddingEngine
     from emb.cache import EmbeddingCache
@@ -74,33 +76,45 @@ def embed(
     # Embed
     entries = engine.embed_entries(entries, cache=cache, checkpoint_dir=cache_dir)
 
-    # Write index
-    index_data = {
-        'metadata': {
-            'total_entries': len(entries),
-            'sources': {},
-            'embedding_model': engine.model,
-            'embedding_dim': engine.dim,
-            'generated_at': datetime.now().isoformat(),
-        },
-        'entries': [e.to_dict() for e in entries],
+    meta = {
+        'embedding_model': engine.model,
+        'embedding_dim': engine.dim,
     }
-    # Count sources
-    for e in entries:
-        s = e.source or 'unknown'
-        index_data['metadata']['sources'][s] = index_data['metadata']['sources'].get(s, 0) + 1
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with open(output, 'w') as f:
-        json.dump(index_data, f)
+    if fmt == 'split':
+        from emb.index import write_index
+        embeddings = np.array([e.embedding for e in entries], dtype=np.float32)
+        write_index(entries, embeddings, output, meta)
+        # Calculate total size
+        total_bytes = sum(f.stat().st_size for f in output.iterdir())
+        console.print(f"  Split index written: {output}/ ({total_bytes / 1024 / 1024:.1f} MB, {len(entries)} entries)")
+    else:
+        # Legacy JSON format
+        index_data = {
+            'metadata': {
+                'total_entries': len(entries),
+                'sources': {},
+                'embedding_model': engine.model,
+                'embedding_dim': engine.dim,
+                'generated_at': datetime.now().isoformat(),
+            },
+            'entries': [e.to_dict() for e in entries],
+        }
+        for e in entries:
+            s = e.source or 'unknown'
+            index_data['metadata']['sources'][s] = index_data['metadata']['sources'].get(s, 0) + 1
 
-    size_mb = output.stat().st_size / 1024 / 1024
-    console.print(f"  Index written: {output} ({size_mb:.1f} MB, {len(entries)} entries)")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with open(output, 'w') as f:
+            json.dump(index_data, f)
+
+        size_mb = output.stat().st_size / 1024 / 1024
+        console.print(f"  Index written: {output} ({size_mb:.1f} MB, {len(entries)} entries)")
 
 
 @app.command()
 def search(
-    index_file: Path = typer.Argument(..., help="Index JSON file to search"),
+    index_file: Path = typer.Argument(..., help="Index file (JSON) or directory (split format)"),
     query: Optional[str] = typer.Argument(None, help="Search query"),
     top_k: int = typer.Option(10, "--top-k", "-k", help="Number of results"),
     sources: Optional[str] = typer.Option(None, "--sources", "-s", help="Comma-separated source filter"),
@@ -252,17 +266,37 @@ def contextualize(
 
 @app.command()
 def info(
-    index_file: Path = typer.Argument(..., help="Index JSON file"),
+    index_file: Path = typer.Argument(..., help="Index file (JSON) or directory (split format)"),
 ):
     """Show index statistics."""
-    with open(index_file, 'r') as f:
-        data = json.load(f)
+    index_file = Path(index_file)
 
-    meta = data.get('metadata', {})
-    entries = data.get('entries', [])
+    if index_file.is_dir():
+        meta_path = index_file / 'metadata.json'
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+        n_entries = meta.get('total_entries', '?')
 
-    console.print(f"\n[bold]Index: {index_file}[/bold]")
-    console.print(f"  Entries: {len(entries)}")
+        # Show disk size breakdown
+        sizes = {}
+        for child in index_file.iterdir():
+            sizes[child.name] = child.stat().st_size
+        total = sum(sizes.values())
+
+        console.print(f"\n[bold]Index: {index_file}/ (split format)[/bold]")
+        console.print(f"  Entries: {n_entries}")
+        console.print(f"  Total size: {total / 1024 / 1024:.1f} MB")
+        for name, size in sorted(sizes.items()):
+            console.print(f"    {name}: {size / 1024 / 1024:.1f} MB")
+    else:
+        with open(index_file, 'r') as f:
+            data = json.load(f)
+        meta = data.get('metadata', {})
+        n_entries = len(data.get('entries', []))
+        size_mb = index_file.stat().st_size / 1024 / 1024
+        console.print(f"\n[bold]Index: {index_file} (JSON format, {size_mb:.1f} MB)[/bold]")
+        console.print(f"  Entries: {n_entries}")
+
     console.print(f"  Model: {meta.get('embedding_model', 'unknown')}")
     console.print(f"  Dim: {meta.get('embedding_dim', 'unknown')}")
     console.print(f"  Generated: {meta.get('generated_at', 'unknown')}")
@@ -272,6 +306,31 @@ def info(
         console.print(f"\n  Sources:")
         for s, count in sorted(sources.items(), key=lambda x: -x[1]):
             console.print(f"    {s}: {count}")
+
+
+@app.command()
+def convert(
+    input_path: Path = typer.Argument(..., help="Input index (JSON file or split directory)"),
+    output_path: Path = typer.Argument(..., help="Output path (directory for split, file for JSON)"),
+):
+    """Convert between JSON and split index formats."""
+    from emb.index import convert_json_to_split, convert_split_to_json
+
+    input_path = Path(input_path)
+    output_path = Path(output_path)
+
+    if input_path.is_dir():
+        # Split -> JSON
+        console.print(f"Converting split format → JSON: {input_path}/ → {output_path}")
+        convert_split_to_json(input_path, output_path)
+        size_mb = output_path.stat().st_size / 1024 / 1024
+        console.print(f"  Written: {output_path} ({size_mb:.1f} MB)")
+    else:
+        # JSON -> Split
+        console.print(f"Converting JSON → split format: {input_path} → {output_path}/")
+        convert_json_to_split(input_path, output_path)
+        total = sum(f.stat().st_size for f in output_path.iterdir())
+        console.print(f"  Written: {output_path}/ ({total / 1024 / 1024:.1f} MB)")
 
 
 @app.command()

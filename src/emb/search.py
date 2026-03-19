@@ -88,14 +88,21 @@ class SearchEngine:
 
     def __init__(self, index_path: Path, source_half_lives: Optional[Dict[str, Optional[float]]] = None):
         index_path = Path(index_path)
-        with open(index_path, 'r') as f:
-            data = json.load(f)
 
-        entries = [Entry.from_dict(e) for e in data['entries']]
-        embeddings = np.array(
-            [e.embedding for e in entries], dtype=np.float32
-        )
-        metadata = data.get('metadata', {})
+        if index_path.is_dir():
+            # Split format: entries.jsonl + embeddings.npy
+            from emb.index import read_index
+            entries, embeddings, metadata = read_index(index_path)
+        else:
+            # Legacy monolithic JSON
+            with open(index_path, 'r') as f:
+                data = json.load(f)
+            entries = [Entry.from_dict(e) for e in data['entries']]
+            embeddings = np.array(
+                [e.embedding for e in entries], dtype=np.float32
+            )
+            metadata = data.get('metadata', {})
+
         self._init_common(entries, embeddings, metadata, source_half_lives)
 
     @classmethod
