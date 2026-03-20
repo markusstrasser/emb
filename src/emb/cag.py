@@ -173,16 +173,25 @@ def _retry_delay(error, default: float = 15.0) -> float:
 
 def _single_batch(client, query: str, batch: Batch, model: str) -> dict:
     from google.genai import types
+    from google.genai.errors import ClientError
 
-    response = client.models.generate_content(
-        model=model,
-        contents=f"Corpus ({len(batch.entries)} entries):\n\n{batch.text}\n\nQuery: {query}",
-        config=types.GenerateContentConfig(
-            system_instruction=SEARCH_SYSTEM,
-            temperature=0.2,
-            max_output_tokens=8192,
-        ),
-    )
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=f"Corpus ({len(batch.entries)} entries):\n\n{batch.text}\n\nQuery: {query}",
+            config=types.GenerateContentConfig(
+                system_instruction=SEARCH_SYSTEM,
+                temperature=0.2,
+                max_output_tokens=8192,
+            ),
+        )
+    except ClientError as e:
+        if e.code == 400 and "token" in str(e).lower() and "exceed" in str(e).lower():
+            # Batch too large for single call — fall back to map-reduce
+            logger.info(f"Single batch overflow ({len(batch.entries)} entries), splitting to map-reduce")
+            sub_batches = pack_batches(batch.entries, max_chars=len(batch.text) // 2)
+            return _map_reduce(client, query, sub_batches, model)
+        raise
 
     usage = response.usage_metadata
     tokens = usage.total_token_count if usage else batch.est_tokens
@@ -200,7 +209,7 @@ def _map_reduce(client, query: str, batches: list[Batch], model: str) -> dict:
     from google.genai import types
     from google.genai.errors import ClientError
 
-    # Map phase: per-shard extraction with retry on rate limits
+    # Map phase: per-shard extraction with retry on rate limits + auto-split on overflow
     def _map_one(batch: Batch) -> str:
         for attempt in range(5):
             try:
@@ -215,6 +224,13 @@ def _map_reduce(client, query: str, batches: list[Batch], model: str) -> dict:
                 )
                 return resp.text or ""
             except ClientError as e:
+                if e.code == 400 and "token" in str(e).lower() and "exceed" in str(e).lower():
+                    # Batch too large — split in half and process sequentially
+                    logger.info(f"Batch overflow ({len(batch.entries)} entries), splitting")
+                    mid = len(batch.entries) // 2
+                    sub_batches = pack_batches(batch.entries[:mid]) + pack_batches(batch.entries[mid:])
+                    parts = [_map_one(sb) for sb in sub_batches]
+                    return "\n\n".join(p for p in parts if p)
                 if e.code == 429 and attempt < 4:
                     wait = _retry_delay(e, default=15 * (attempt + 1))
                     logger.info(f"Rate limited, waiting {wait:.0f}s (attempt {attempt+1}/5)")
@@ -225,7 +241,7 @@ def _map_reduce(client, query: str, batches: list[Batch], model: str) -> dict:
         return ""
 
     # Limit concurrency to stay under token-per-minute quotas.
-    # Gemini Flash Lite: 10M tokens/min. Each shard is ~930K tokens.
+    # Gemini Flash Lite: 10M tokens/min. Each shard is ~950K tokens.
     # 2 workers ≈ 1.9M tokens in flight — safe headroom.
     workers = min(len(batches), 2)
     logger.info(f"Map phase: {len(batches)} shards, {workers} workers")
