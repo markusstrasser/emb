@@ -185,9 +185,11 @@ def _cag_search(index_file: Path, query, sources, json_output, cag_model):
 
     source_set = set(s.strip() for s in sources.split(',')) if sources else None
 
-    total_chars = sum(len(e.text) for e in entries)
+    # Show post-filter stats
+    filtered = [e for e in entries if e.source in source_set] if source_set else entries
+    total_chars = sum(len(e.text) for e in filtered)
     est_tokens = total_chars // 4
-    console.print(f"  {len(entries)} entries, ~{est_tokens:,} tokens")
+    console.print(f"  {len(filtered):,} entries ({len(entries):,} total), ~{est_tokens:,} tokens")
 
     result = cag_search(query, entries, model=cag_model, sources=source_set)
 

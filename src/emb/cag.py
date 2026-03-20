@@ -15,9 +15,11 @@ from emb.schema import Entry
 logger = logging.getLogger(__name__)
 
 # Token budget — Gemini 3.1 Flash Lite: 1M input, 65K output
-CHARS_PER_TOKEN = 4
+# Conservative: 3 chars/token handles short entries, metadata, non-English text.
+# Real ratio varies 2.5–4.5; 3 keeps us safely under limits.
+CHARS_PER_TOKEN = 3
 MAX_INPUT_TOKENS = 1_048_576
-RESERVED_TOKENS = 70_000  # system prompt + query + output headroom
+RESERVED_TOKENS = 100_000  # system prompt + query + wrapper text + output headroom
 MAX_CORPUS_TOKENS = MAX_INPUT_TOKENS - RESERVED_TOKENS
 MAX_CORPUS_CHARS = MAX_CORPUS_TOKENS * CHARS_PER_TOKEN
 
@@ -159,6 +161,16 @@ def _flush_batch(
     ))
 
 
+def _retry_delay(error, default: float = 15.0) -> float:
+    """Extract retry delay from Gemini 429 error, or use default."""
+    import re
+    msg = str(error)
+    m = re.search(r'retry(?:Delay)?["\s:]*(\d+)', msg, re.IGNORECASE)
+    if m:
+        return float(m.group(1))
+    return default
+
+
 def _single_batch(client, query: str, batch: Batch, model: str) -> dict:
     from google.genai import types
 
@@ -186,25 +198,40 @@ def _single_batch(client, query: str, batch: Batch, model: str) -> dict:
 
 def _map_reduce(client, query: str, batches: list[Batch], model: str) -> dict:
     from google.genai import types
+    from google.genai.errors import ClientError
 
-    # Map phase: parallel per-shard extraction
+    # Map phase: per-shard extraction with retry on rate limits
     def _map_one(batch: Batch) -> str:
-        resp = client.models.generate_content(
-            model=model,
-            contents=f"Corpus shard ({len(batch.entries)} entries):\n\n{batch.text}\n\nQuery: {query}",
-            config=types.GenerateContentConfig(
-                system_instruction=MAP_SYSTEM,
-                temperature=0.2,
-                max_output_tokens=4096,
-            ),
-        )
-        return resp.text or ""
+        for attempt in range(5):
+            try:
+                resp = client.models.generate_content(
+                    model=model,
+                    contents=f"Corpus shard ({len(batch.entries)} entries):\n\n{batch.text}\n\nQuery: {query}",
+                    config=types.GenerateContentConfig(
+                        system_instruction=MAP_SYSTEM,
+                        temperature=0.2,
+                        max_output_tokens=4096,
+                    ),
+                )
+                return resp.text or ""
+            except ClientError as e:
+                if e.code == 429 and attempt < 4:
+                    wait = _retry_delay(e, default=15 * (attempt + 1))
+                    logger.info(f"Rate limited, waiting {wait:.0f}s (attempt {attempt+1}/5)")
+                    import time
+                    time.sleep(wait)
+                else:
+                    raise
+        return ""
 
-    shard_results = []
-    workers = min(len(batches), MAX_WORKERS)
+    # Limit concurrency to stay under token-per-minute quotas.
+    # Gemini Flash Lite: 10M tokens/min. Each shard is ~930K tokens.
+    # 2 workers ≈ 1.9M tokens in flight — safe headroom.
+    workers = min(len(batches), 2)
+    logger.info(f"Map phase: {len(batches)} shards, {workers} workers")
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_map_one, b): i for i, b in enumerate(batches)}
-        # Collect in order
         ordered = [None] * len(batches)
         for future in as_completed(futures):
             idx = futures[future]
