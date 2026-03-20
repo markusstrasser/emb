@@ -139,13 +139,32 @@ Deduplicate overlapping information. If all shards found nothing relevant, say s
 # --- Internal ---
 
 def _format_entry(entry: Entry) -> str:
-    """Format a single entry for context stuffing."""
-    parts = [f"--- [{entry.source or 'unknown'}] {entry.title or entry.id} ---\n"]
+    """Format a single entry for context stuffing. Markdown headers as boundaries."""
+    parts = [f"### [{entry.source or 'unknown'}] {entry.title or entry.id}"]
     if entry.date:
-        parts.append(f"Date: {entry.date}\n")
-    parts.append(entry.text)
-    parts.append("\n\n")
+        parts[0] += f" ({entry.date})"
+    parts.append(f"\n{entry.text}\n\n")
     return "".join(parts)
+
+
+def _build_manifest(entries: list[Entry]) -> str:
+    """Build a compact manifest/TOC so the model has a map before reading content."""
+    from collections import Counter, defaultdict
+
+    source_counts = Counter(e.source or 'unknown' for e in entries)
+    source_titles: dict[str, list[str]] = defaultdict(list)
+    for e in entries:
+        src = e.source or 'unknown'
+        if len(source_titles[src]) < 5:  # sample up to 5 titles per source
+            source_titles[src].append(e.title or e.id)
+
+    lines = [f"## Manifest ({len(entries)} entries)\n"]
+    for src, count in source_counts.most_common():
+        samples = ", ".join(source_titles[src])
+        suffix = ", ..." if count > 5 else ""
+        lines.append(f"- **{src}** ({count}): {samples}{suffix}")
+    lines.append("\n---\n")
+    return "\n".join(lines)
 
 
 def _flush_batch(
@@ -153,9 +172,11 @@ def _flush_batch(
     parts: list[str],
     entries: list[Entry],
 ) -> None:
-    text = "".join(parts)
+    entry_list = list(entries)
+    manifest = _build_manifest(entry_list)
+    text = manifest + "".join(parts)
     batches.append(Batch(
-        entries=list(entries),
+        entries=entry_list,
         text=text,
         est_tokens=len(text) // CHARS_PER_TOKEN,
     ))
