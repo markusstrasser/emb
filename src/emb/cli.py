@@ -124,8 +124,14 @@ def search(
     interactive: bool = typer.Option(False, "--interactive", "-i", help="Interactive mode"),
     detailed: bool = typer.Option(False, "--detailed", "-d", help="Show full text preview"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    cag: bool = typer.Option(False, "--cag", help="CAG mode: skip embeddings, span Gemini over raw text"),
+    cag_model: Optional[str] = typer.Option(None, "--cag-model", help="Gemini model for CAG (default: gemini-3.1-flash-lite-preview)"),
 ):
     """Search an index."""
+    if cag:
+        _cag_search(index_file, query, sources, json_output, cag_model)
+        return
+
     from emb.search import SearchEngine
 
     engine = SearchEngine(index_file)
@@ -149,6 +155,47 @@ def search(
         print(json.dumps(results, indent=2, default=str))
     else:
         _display_results(results, detailed=detailed)
+
+
+def _cag_search(index_file: Path, query, sources, json_output, cag_model):
+    """CAG mode: load entries, stuff into Gemini context, get prose answer."""
+    from emb.io import read_jsonl
+    from emb.cag import cag_search
+
+    if not query:
+        console.print("[red]CAG mode requires a query[/red]")
+        raise typer.Exit(1)
+
+    # Load entries — from split index (entries.jsonl) or raw JSONL
+    index_file = Path(index_file)
+    if index_file.is_dir():
+        entries_path = index_file / "entries.jsonl"
+        if not entries_path.exists():
+            console.print(f"[red]No entries.jsonl in {index_file}/[/red]")
+            raise typer.Exit(1)
+        entries = read_jsonl(str(entries_path))
+    elif str(index_file).endswith('.jsonl'):
+        entries = read_jsonl(str(index_file))
+    else:
+        # Legacy JSON format — load entries without embeddings
+        with open(index_file, 'r') as f:
+            from emb.schema import Entry
+            data = json.load(f)
+        entries = [Entry.from_dict(e) for e in data.get('entries', [])]
+
+    source_set = set(s.strip() for s in sources.split(',')) if sources else None
+
+    total_chars = sum(len(e.text) for e in entries)
+    est_tokens = total_chars // 4
+    console.print(f"  {len(entries)} entries, ~{est_tokens:,} tokens")
+
+    result = cag_search(query, entries, model=cag_model, sources=source_set)
+
+    if json_output:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        console.print(f"\n[dim]{result['model']} | {result['batches']} batch(es) | {result['entries']} entries | ~{result['tokens_used']:,} tokens[/dim]\n")
+        console.print(result['answer'])
 
 
 def _interactive_loop(engine):

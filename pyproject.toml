@@ -21,6 +21,9 @@ image = [
 rerank = [
     "sentence-transformers>=2.2.0",
 ]
+cag = [
+    "google-genai>=1.0.0",
+]
 contextualize = [
     "litellm>=1.0.0",
 ]
