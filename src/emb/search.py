@@ -160,7 +160,7 @@ class SearchEngine:
         """Build FTS5 index lazily."""
         if self._fts_db is not None:
             return
-        self._fts_db = sqlite3.connect(':memory:')
+        self._fts_db = sqlite3.connect(':memory:', check_same_thread=False)
         cur = self._fts_db.cursor()
         cur.execute('''
             CREATE VIRTUAL TABLE fts_entries USING fts5(
