@@ -3,10 +3,12 @@
 Calls a cheap LLM to generate a short (1-2 sentence) context for each entry,
 then prepends it to the text. This dramatically improves retrieval quality
 (Anthropic research: 35-49% fewer failed retrievals).
+
+Uses google-genai SDK directly (Gemini models).
 """
 import sys
 import asyncio
-from typing import List
+from typing import List, Optional
 from emb.schema import Entry
 
 
@@ -32,20 +34,19 @@ def build_context_prompt(entry: Entry) -> str:
     )
 
 
-async def contextualize_entry(entry: Entry, model: str, litellm_module) -> Entry:
+async def contextualize_entry(entry: Entry, model: str, client) -> Entry:
     """Add LLM-generated context to a single entry."""
     if entry.metadata.get("contextualized"):
         return entry  # Already done
 
     prompt = build_context_prompt(entry)
     try:
-        response = await litellm_module.acompletion(
+        response = await client.aio.models.generate_content(
             model=model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=150,
-            temperature=0.0,
+            contents=prompt,
+            config={"max_output_tokens": 150, "temperature": 0.0},
         )
-        context = response.choices[0].message.content.strip()
+        context = response.text.strip()
     except Exception as e:
         print(f"  Warning: LLM call failed for {entry.id}: {e}", file=sys.stderr)
         return entry  # Return unchanged on error
@@ -67,21 +68,21 @@ async def contextualize_entry(entry: Entry, model: str, litellm_module) -> Entry
 
 async def contextualize_batch(
     entries: List[Entry],
-    model: str = "gemini/gemini-2.0-flash",
+    model: str = "gemini-2.0-flash",
     concurrency: int = 10,
-    litellm_module=None,
+    client=None,
 ) -> List[Entry]:
     """Contextualize entries with bounded concurrency.
 
     Args:
         entries: Entries to contextualize.
-        model: litellm model string (e.g. "gemini/gemini-2.0-flash", "anthropic/claude-haiku-4-5-20251001")
+        model: Gemini model name (e.g. "gemini-2.0-flash")
         concurrency: Max parallel LLM calls.
-        litellm_module: litellm module (for dependency injection/testing)
+        client: google.genai.Client instance (created if not provided)
     """
-    if litellm_module is None:
-        import litellm
-        litellm_module = litellm
+    if client is None:
+        from google import genai
+        client = genai.Client()
 
     # Split into already-done and needs-work
     needs_work = [e for e in entries if not e.metadata.get("contextualized")]
@@ -101,7 +102,7 @@ async def contextualize_batch(
     async def _process(entry):
         nonlocal done_count
         async with semaphore:
-            result = await contextualize_entry(entry, model, litellm_module)
+            result = await contextualize_entry(entry, model, client)
             done_count += 1
             if done_count % 50 == 0 or done_count == total:
                 print(f"  [{done_count}/{total}]", flush=True)
@@ -118,9 +119,9 @@ async def contextualize_batch(
 
 def contextualize_sync(
     entries: List[Entry],
-    model: str = "gemini/gemini-2.0-flash",
+    model: str = "gemini-2.0-flash",
     concurrency: int = 10,
-    litellm_module=None,
+    client=None,
 ) -> List[Entry]:
     """Synchronous wrapper for contextualize_batch."""
-    return asyncio.run(contextualize_batch(entries, model, concurrency, litellm_module))
+    return asyncio.run(contextualize_batch(entries, model, concurrency, client))

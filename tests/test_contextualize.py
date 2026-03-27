@@ -11,13 +11,12 @@ from emb.contextualize import (
 from emb.schema import Entry
 
 
-def _mock_litellm(response_text="This is about Python programming."):
-    """Create a mock litellm module."""
+def _mock_client(response_text="This is about Python programming."):
+    """Create a mock google.genai.Client."""
     mock = MagicMock()
     mock_response = MagicMock()
-    mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = response_text
-    mock.acompletion = AsyncMock(return_value=mock_response)
+    mock_response.text = response_text
+    mock.aio.models.generate_content = AsyncMock(return_value=mock_response)
     return mock
 
 
@@ -47,9 +46,9 @@ def test_build_context_prompt_handles_missing_fields():
 
 def test_contextualize_entry():
     entry = Entry(id="x", text="Original text", source="test")
-    mock_llm = _mock_litellm("This discusses testing.")
+    mock = _mock_client("This discusses testing.")
 
-    result = asyncio.run(contextualize_entry(entry, "test-model", mock_llm))
+    result = asyncio.run(contextualize_entry(entry, "test-model", mock))
     assert result.text.startswith("This discusses testing.")
     assert "Original text" in result.text
     assert result.metadata["contextualized"] is True
@@ -58,28 +57,28 @@ def test_contextualize_entry():
 
 def test_contextualize_entry_skips_already_done():
     entry = Entry(id="x", text="Already done", metadata={"contextualized": True})
-    mock_llm = _mock_litellm()
+    mock = _mock_client()
 
-    result = asyncio.run(contextualize_entry(entry, "test-model", mock_llm))
+    result = asyncio.run(contextualize_entry(entry, "test-model", mock))
     assert result.text == "Already done"  # unchanged
-    mock_llm.acompletion.assert_not_called()
+    mock.aio.models.generate_content.assert_not_called()
 
 
 def test_contextualize_entry_handles_error():
     entry = Entry(id="x", text="Original", source="test")
-    mock_llm = MagicMock()
-    mock_llm.acompletion = AsyncMock(side_effect=Exception("API error"))
+    mock = MagicMock()
+    mock.aio.models.generate_content = AsyncMock(side_effect=Exception("API error"))
 
-    result = asyncio.run(contextualize_entry(entry, "test-model", mock_llm))
+    result = asyncio.run(contextualize_entry(entry, "test-model", mock))
     assert result.text == "Original"  # unchanged on error
 
 
 def test_contextualize_entry_preserves_existing_metadata():
     """Existing metadata fields should survive contextualization."""
     entry = Entry(id="x", text="Hello", source="test", metadata={"custom_key": 42})
-    mock_llm = _mock_litellm("Context.")
+    mock = _mock_client("Context.")
 
-    result = asyncio.run(contextualize_entry(entry, "test-model", mock_llm))
+    result = asyncio.run(contextualize_entry(entry, "test-model", mock))
     assert result.metadata["custom_key"] == 42
     assert result.metadata["contextualized"] is True
 
@@ -87,9 +86,9 @@ def test_contextualize_entry_preserves_existing_metadata():
 def test_contextualize_entry_preserves_other_fields():
     """source, title, date, id should be preserved."""
     entry = Entry(id="myid", text="Hello", source="git", title="My Title", date="2025-01-01")
-    mock_llm = _mock_litellm("Context.")
+    mock = _mock_client("Context.")
 
-    result = asyncio.run(contextualize_entry(entry, "test-model", mock_llm))
+    result = asyncio.run(contextualize_entry(entry, "test-model", mock))
     assert result.id == "myid"
     assert result.source == "git"
     assert result.title == "My Title"
@@ -102,9 +101,9 @@ def test_contextualize_batch():
         Entry(id="b", text="Second entry", source="test"),
         Entry(id="c", text="Already done", metadata={"contextualized": True}),
     ]
-    mock_llm = _mock_litellm("Context added.")
+    mock = _mock_client("Context added.")
 
-    results = asyncio.run(contextualize_batch(entries, "test-model", concurrency=2, litellm_module=mock_llm))
+    results = asyncio.run(contextualize_batch(entries, "test-model", concurrency=2, client=mock))
     assert len(results) == 3
     # a and b should be contextualized
     assert results[0].metadata.get("contextualized") is True
@@ -112,7 +111,7 @@ def test_contextualize_batch():
     # c was already done
     assert results[2].text == "Already done"
     # LLM should have been called twice (not for c)
-    assert mock_llm.acompletion.call_count == 2
+    assert mock.aio.models.generate_content.call_count == 2
 
 
 def test_contextualize_batch_all_already_done():
@@ -121,34 +120,34 @@ def test_contextualize_batch_all_already_done():
         Entry(id="a", text="Done 1", metadata={"contextualized": True}),
         Entry(id="b", text="Done 2", metadata={"contextualized": True}),
     ]
-    mock_llm = _mock_litellm()
+    mock = _mock_client()
 
-    results = asyncio.run(contextualize_batch(entries, "test-model", litellm_module=mock_llm))
+    results = asyncio.run(contextualize_batch(entries, "test-model", client=mock))
     assert len(results) == 2
-    mock_llm.acompletion.assert_not_called()
+    mock.aio.models.generate_content.assert_not_called()
 
 
 def test_contextualize_sync():
     entries = [Entry(id="x", text="Hello", source="test")]
-    mock_llm = _mock_litellm("Context.")
+    mock = _mock_client("Context.")
 
-    results = contextualize_sync(entries, "test-model", litellm_module=mock_llm)
+    results = contextualize_sync(entries, "test-model", client=mock)
     assert len(results) == 1
     assert results[0].metadata["contextualized"] is True
 
 
 def test_contextualize_preserves_order():
     entries = [Entry(id=f"e{i}", text=f"text {i}", source="test") for i in range(5)]
-    mock_llm = _mock_litellm("Ctx.")
+    mock = _mock_client("Ctx.")
 
-    results = asyncio.run(contextualize_batch(entries, "test-model", litellm_module=mock_llm))
+    results = asyncio.run(contextualize_batch(entries, "test-model", client=mock))
     for i, r in enumerate(results):
         assert r.id == f"e{i}"
 
 
 def test_contextualize_batch_empty_list():
     """Empty input should return empty output without error."""
-    mock_llm = _mock_litellm()
-    results = asyncio.run(contextualize_batch([], "test-model", litellm_module=mock_llm))
+    mock = _mock_client()
+    results = asyncio.run(contextualize_batch([], "test-model", client=mock))
     assert results == []
-    mock_llm.acompletion.assert_not_called()
+    mock.aio.models.generate_content.assert_not_called()

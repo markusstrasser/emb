@@ -297,7 +297,7 @@ def _display_results(results, detailed=False):
 def contextualize(
     input_file: str = typer.Argument(..., help="JSONL input file"),
     output_file: str = typer.Argument(..., help="JSONL output file"),
-    model: str = typer.Option("gemini/gemini-2.0-flash", "--model", "-m", help="LLM model (litellm format)"),
+    model: str = typer.Option("gemini-2.0-flash", "--model", "-m", help="Gemini model name"),
     concurrency: int = typer.Option(10, "--concurrency", "-c", help="Max parallel LLM calls"),
 ):
     """Add LLM-generated context to entries (Anthropic's Contextual Retrieval)."""

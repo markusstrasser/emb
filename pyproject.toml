@@ -25,7 +25,7 @@ cag = [
     "google-genai>=1.0.0",
 ]
 contextualize = [
-    "litellm>=1.0.0",
+    "google-genai>=1.0.0",
 ]
 dev = [
     "pytest>=9.0.1",
