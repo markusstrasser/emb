@@ -389,7 +389,16 @@ class SearchEngine:
 
         # Sort
         if sort_by == 'date':
-            results.sort(key=lambda x: (self._parsed_dates[x['idx']] or datetime.min, x['score']), reverse=True)
+            # Clamp future dates to today — recurring calendar events (2056+) must not
+            # dominate date-sorted results over genuinely recent content.
+            # Use date-only precision (midnight) so same-day entries tie fairly on score.
+            _today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            def _date_sort_key(x):
+                d = self._parsed_dates[x['idx']] or datetime.min
+                # Strip time for day-level comparison, clamp future to today
+                d_day = d.replace(hour=0, minute=0, second=0, microsecond=0)
+                return (min(d_day, _today), x['score'])
+            results.sort(key=_date_sort_key, reverse=True)
         else:
             results.sort(key=lambda x: x['score'], reverse=True)
 

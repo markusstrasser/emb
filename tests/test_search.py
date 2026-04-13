@@ -262,6 +262,30 @@ def test_sort_by_date(tmp_path):
     assert results[2]['id'] == 'old'
 
 
+def test_sort_by_date_clamps_future(tmp_path):
+    """Future-dated entries (recurring calendar events) should not dominate date sort.
+
+    Before the fix, a 2056 calendar entry would sort above a 2025 entity page
+    because sort_by=date had no upper bound. After the fix, future dates are
+    clamped to now(), so genuinely recent entries rank first.
+    """
+    from datetime import datetime, timedelta
+    today = datetime.now().strftime('%Y-%m-%d')
+    path = _make_index([
+        {'id': 'future', 'text': 'recurring event', 'date': '2056-02-15', 'embedding': [0.3, 0, 0, 1]},
+        {'id': 'today', 'text': 'entity page updated today', 'date': today, 'embedding': [1, 0, 0, 0]},
+        {'id': 'old', 'text': 'old conversation', 'date': '2024-08-01', 'embedding': [0.5, 0.5, 0, 0]},
+    ], tmp_path)
+    engine = SearchEngine(path)
+    engine._encode_query = lambda q: np.array([1, 0, 0, 0], dtype=np.float32)
+
+    results = engine.search("test", sort_by='date')
+    # Both 'future' and 'today' clamp to the same date (now), so tiebreak is by score.
+    # 'today' has higher similarity (1.0 vs 0.3), so it should win.
+    assert results[0]['id'] == 'today', f"Expected 'today' first, got '{results[0]['id']}'"
+    assert results[2]['id'] == 'old'
+
+
 def test_add_index_merges(tmp_path):
     path1 = _make_index([
         {'id': 'a', 'text': 'first index', 'source': 'src1'},
