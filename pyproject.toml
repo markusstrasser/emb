@@ -21,11 +21,9 @@ image = [
 rerank = [
     "sentence-transformers>=2.2.0",
 ]
-cag = [
+gemini = [
     "google-genai>=1.0.0",
-]
-contextualize = [
-    "google-genai>=1.0.0",
+    "pillow>=10.0.0",
 ]
 dev = [
     "pytest>=9.0.1",

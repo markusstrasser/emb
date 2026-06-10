@@ -63,8 +63,12 @@ def embed(
         console.print(f"  Chunked: {before} -> {len(entries)} entries")
 
     # Set up engine + cache
+    from emb.embed import model_slug
     engine = EmbeddingEngine(model=model)
-    cache_dir = output.parent / f".emb_cache_{output.stem}"
+    # Namespace the cache by model slug: two models can share a dimension (gte-768 vs
+    # gemini-768) but produce vectors in incompatible spaces. A dim check alone can't
+    # tell them apart, so a shared cache dir would yield silent wrong-vector hits.
+    cache_dir = output.parent / f".emb_cache_{output.stem}" / model_slug(model)
 
     if force:
         cache = EmbeddingCache(dim=engine.dim)
@@ -291,6 +295,44 @@ def _display_results(results, detailed=False):
         if detailed:
             console.print(f"  {r.get('text', '')}")
         console.print(f"  ID: {r.get('id', '')}")
+
+
+@app.command()
+def pairs(
+    index_file: Path = typer.Argument(..., help="Index directory (split) or JSON file"),
+    threshold: float = typer.Option(0.85, "--threshold", "-t", help="Min similarity"),
+    max_threshold: Optional[float] = typer.Option(None, "--max-threshold", help="Max similarity (for bands, e.g. interference 0.50-0.80)"),
+    top_k: Optional[int] = typer.Option(None, "--top-k", "-k", help="Keep only each item's top-K partners (caps output)"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Write pairs as JSONL (default: print summary)"),
+):
+    """Find all high-similarity PAIRS within a corpus (duplicates, interference)."""
+    import numpy as np
+    from emb.pairs import find_pairs, write_pairs_jsonl
+
+    index_file = Path(index_file)
+    if index_file.is_dir():
+        from emb.index import read_index
+        entries, embeddings, _ = read_index(index_file)
+    else:
+        with open(index_file) as f:
+            from emb.schema import Entry
+            data = json.load(f)
+        entries = [Entry.from_dict(e) for e in data['entries']]
+        embeddings = np.array([e.embedding for e in entries], dtype=np.float32)
+
+    console.print(f"  {len(entries)} entries, computing pairs (threshold={threshold})...")
+    found = find_pairs(embeddings, threshold=threshold, max_threshold=max_threshold, top_k=top_k)
+    console.print(f"  Found {len(found)} pairs")
+
+    if output:
+        ids = [e.id for e in entries]
+        write_pairs_jsonl(found, output, ids=ids)
+        console.print(f"  Written to {output}")
+    else:
+        for i, j, sim in found[:50]:
+            console.print(f"  {sim:.4f}  [{entries[i].id}]  ~  [{entries[j].id}]")
+        if len(found) > 50:
+            console.print(f"  ... and {len(found) - 50} more (use --output to write all)")
 
 
 @app.command()
