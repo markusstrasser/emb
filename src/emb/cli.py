@@ -123,6 +123,8 @@ def search(
     top_k: int = typer.Option(10, "--top-k", "-k", help="Number of results"),
     sources: Optional[str] = typer.Option(None, "--sources", "-s", help="Comma-separated source filter"),
     hybrid: bool = typer.Option(False, "--hybrid", help="Enable BM25+dense hybrid (RRF)"),
+    fusion: str = typer.Option("rrf", "--fusion", help="Hybrid fusion: rrf or convex"),
+    convex_alpha: float = typer.Option(0.5, "--convex-alpha", help="Dense weight for convex fusion (0-1)"),
     rerank: bool = typer.Option(False, "--rerank", help="Cross-encoder reranking"),
     fresh: float = typer.Option(0.0, "--fresh", "-f", help="Freshness weight (0.0-1.0)"),
     interactive: bool = typer.Option(False, "--interactive", "-i", help="Interactive mode"),
@@ -153,6 +155,7 @@ def search(
     results = engine.search(
         query, top_k=top_k, sources=source_set,
         hybrid=hybrid, rerank=rerank, freshness_weight=fresh,
+        fusion=fusion, convex_alpha=convex_alpha,
     )
 
     if json_output:
@@ -295,6 +298,80 @@ def _display_results(results, detailed=False):
         if detailed:
             console.print(f"  {r.get('text', '')}")
         console.print(f"  ID: {r.get('id', '')}")
+
+
+@app.command()
+def read(
+    index_file: Path = typer.Argument(..., help="Index directory (split) or JSON file"),
+    query: str = typer.Argument(..., help="Search query"),
+    top_k: int = typer.Option(200, "--top-k", "-k", help="How many hits to read over"),
+    sources: Optional[str] = typer.Option(None, "--sources", "-s", help="Comma-separated source filter"),
+    since: Optional[str] = typer.Option(None, "--since", help="ISO date filter (e.g. 2026-01-01)"),
+    hybrid: bool = typer.Option(True, "--hybrid/--dense", help="Hybrid BM25+dense retrieval (default on)"),
+    rerank: bool = typer.Option(False, "--rerank", help="Cross-encoder rerank the hits before reading"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Gemini model (default: gemini-3.1-flash-lite-preview)"),
+    max_tokens: int = typer.Option(0, "--max-tokens", help="Cap corpus tokens sent to the model (0 = no cap)"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the cost confirmation prompt"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """Locate with the local index, then READ the hits with a long-context model.
+
+    The June-2026 pattern: cheap exact retrieval narrows the corpus, a long-context
+    model synthesizes over only the hits. Distinct from `search --cag` (which spans the
+    model over the WHOLE corpus for exhaustive recall) — `read` is bounded and cheap.
+    """
+    from datetime import datetime
+    from dateutil import parser as date_parser
+    from emb.search import SearchEngine
+    from emb.cag import cag_search, _format_entry, CHARS_PER_TOKEN, DEFAULT_MODEL
+
+    model = model or DEFAULT_MODEL
+    engine = SearchEngine(index_file)
+    source_set = set(s.strip() for s in sources.split(',')) if sources else None
+    since_dt = date_parser.parse(since) if since else None
+
+    results = engine.search(
+        query, top_k=top_k, sources=source_set, since=since_dt,
+        hybrid=hybrid, rerank=rerank,
+    )
+    if not results:
+        console.print("  No hits to read.")
+        raise typer.Exit(0)
+
+    # Pull the FULL entries for the hits (search output truncates text to 300 chars).
+    by_id = {e.id: e for e in engine.entries}
+    hits = [by_id[r['id']] for r in results if r['id'] in by_id]
+
+    # Cost preflight — gemini-3.1-flash-lite: $0.25/MTok in, $1.50/MTok out (verified).
+    est_in_tokens = sum(len(_format_entry(e)) for e in hits) // CHARS_PER_TOKEN
+    est_out_tokens = 8192
+    in_rate, out_rate = 0.25, 1.50
+    if 'flash-lite' not in model:
+        in_rate, out_rate = (0.50, 3.0) if '3-flash' in model else (1.50, 9.0)
+    est_cost = est_in_tokens / 1e6 * in_rate + est_out_tokens / 1e6 * out_rate
+
+    console.print(f"  {len(hits)} hits → ~{est_in_tokens:,} input tokens, model={model}")
+    console.print(f"  [dim]Estimated cost: ${est_cost:.4f} (in ${est_in_tokens/1e6*in_rate:.4f} + out ~${est_out_tokens/1e6*out_rate:.4f})[/dim]")
+    if est_cost > 1.0 and not yes:
+        import sys
+        if sys.stdin.isatty():
+            resp = input(f"  This will cost ~${est_cost:.2f}. Proceed? [y/N] ").strip().lower()
+            if resp not in ('y', 'yes'):
+                console.print("  Aborted.")
+                raise typer.Exit(0)
+        else:
+            console.print(f"[yellow]  Cost ~${est_cost:.2f} exceeds $1 and no TTY to confirm. Pass --yes to proceed.[/yellow]")
+            raise typer.Exit(1)
+
+    from emb.cag import MAX_CORPUS_CHARS
+    max_chars = max_tokens * CHARS_PER_TOKEN if max_tokens > 0 else MAX_CORPUS_CHARS
+    result = cag_search(query, hits, model=model, max_chars=max_chars)
+
+    if json_output:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        console.print(f"\n[dim]{result['model']} | {result['batches']} batch(es) | {result['entries']} entries | ~{result['tokens_used']:,} tokens[/dim]\n")
+        console.print(result['answer'])
 
 
 @app.command()
