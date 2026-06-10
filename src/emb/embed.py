@@ -186,11 +186,12 @@ class EmbeddingEngine:
     def embed_media(self, items: List[Tuple]) -> np.ndarray:
         """Embed multimodal items via Gemini's native multi-part fusion.
 
-        Each item is (data, mime, description):
-          - data: raw bytes, or a str/Path to a file (read as bytes)
-          - mime: e.g. 'image/png', 'image/gif', 'image/jpeg', 'audio/mpeg'
-          - description: optional text fused with the media in one Content (front/back
-            card text, caption, etc.). Empty string → media-only.
+        Each item is (description, media):
+          - description: text fused with the media in one Content (front/back card
+            text, caption). '' → media-only (e.g. image-occlusion cards).
+          - media: list of (data, mime) parts, e.g. [(png_bytes, 'image/png'),
+            (mp3_bytes, 'audio/mpeg')]. data may be raw bytes or a str/Path (read as
+            bytes). One Content per item — all parts fuse into a single embedding.
 
         No document parsing happens here (PDF→image extraction stays consumer-side).
         Returns an (N, dim) L2-normalized float32 array. Gemini backend only.
@@ -199,13 +200,14 @@ class EmbeddingEngine:
             raise ValueError(f"embed_media requires the gemini backend, not {self.backend!r}")
         from google.genai import types
         contents = []
-        for data, mime, description in items:
-            if isinstance(data, (str, Path)):
-                data = Path(data).read_bytes()
+        for description, media in items:
             parts = []
             if description:
                 parts.append(types.Part(text=description))
-            parts.append(types.Part.from_bytes(data=data, mime_type=mime))
+            for data, mime in media:
+                if isinstance(data, (str, Path)):
+                    data = Path(data).read_bytes()
+                parts.append(types.Part.from_bytes(data=data, mime_type=mime))
             contents.append(types.Content(parts=parts))
         raw = self._gemini_embed_contents(contents)
         return np.asarray(_l2_normalize(raw), dtype=np.float32)
