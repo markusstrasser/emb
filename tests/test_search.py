@@ -163,6 +163,39 @@ def test_bm25_boosts_exact_match(tmp_path):
     assert hybrid_results[0]['id'] == 'keyword'
 
 
+def test_bm25_pushdown_no_starvation(tmp_path):
+    """With a narrow source filter, the matching row must survive BM25 even when many
+    higher-BM25 rows in OTHER sources would otherwise consume the limit."""
+    data = [{'id': f'noise{i}', 'text': 'python programming language tutorial', 'source': 'big'}
+            for i in range(300)]
+    data.append({'id': 'target', 'text': 'python programming language tutorial', 'source': 'rare'})
+    path = _make_index(data, tmp_path)
+    engine = SearchEngine(path)
+    engine._encode_query = lambda q: np.random.randn(4).astype(np.float32)
+    # Filter to the rare source — only 'target' matches. Pushdown must find it via BM25.
+    results = engine.search("python programming", hybrid=True, sources={'rare'}, top_k=5)
+    assert [r['id'] for r in results] == ['target']
+    # provenance proves the BM25 leg fired for it (not just dense)
+    res2 = engine.search("python programming", hybrid=True, sources={'rare'}, top_k=5, provenance=True)
+    assert res2[0]['provenance']['bm25_rank'] is not None
+
+
+def test_convex_fusion_runs_and_orders(tmp_path):
+    path = _make_index([
+        {'id': 'keyword', 'text': 'quantum entanglement', 'embedding': [0, 1, 0, 0]},
+        {'id': 'dense', 'text': 'unrelated text here', 'embedding': [1, 0, 0, 0]},
+        {'id': 'other', 'text': 'more filler content', 'embedding': [0, 0, 1, 0]},
+    ], tmp_path)
+    engine = SearchEngine(path)
+    engine._encode_query = lambda q: np.array([1, 0, 0, 0], dtype=np.float32)
+    # alpha=1 → pure dense leg; 'dense' should top
+    r_dense = engine.search("quantum entanglement", hybrid=True, fusion='convex', convex_alpha=1.0)
+    assert r_dense[0]['id'] == 'dense'
+    # alpha=0 → pure BM25 leg; 'keyword' (exact term match) should top
+    r_bm25 = engine.search("quantum entanglement", hybrid=True, fusion='convex', convex_alpha=0.0)
+    assert r_bm25[0]['id'] == 'keyword'
+
+
 def test_chunk_deduplication(tmp_path):
     """Chunks from same parent should be deduped to best one."""
     path = _make_index([

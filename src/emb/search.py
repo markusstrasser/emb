@@ -198,19 +198,36 @@ class SearchEngine:
                     safe_tokens.append(f'"{cleaned}"')
         return ' '.join(safe_tokens)
 
-    def _bm25_search(self, query: str, limit: int = 200) -> List[Tuple[int, float]]:
-        """BM25 search via FTS5. Returns (index, score) tuples."""
+    def _bm25_search(self, query: str, limit: int = 200,
+                     valid_rowids: Optional[Set[int]] = None) -> List[Tuple[int, float]]:
+        """BM25 search via FTS5. Returns (index, score) tuples.
+
+        When `valid_rowids` is given, the filter is pushed INTO the FTS query so the
+        LIMIT counts only rows that survive filtering. Without this, a narrow source
+        filter starves the BM25 leg — top-200 corpus-wide hits might contain only a
+        handful of matching rows, while the dense leg sees every matching row. This
+        is the one real truncation surface in hybrid search (dense pre-filters exactly).
+        """
         self._ensure_fts_index()
         safe = self._fts5_safe_query(query)
         if not safe:
             return []
         cur = self._fts_db.cursor()
         try:
-            rows = cur.execute('''
-                SELECT rowid, bm25(fts_entries, 10.0, 1.0, 0.0) as score
-                FROM fts_entries WHERE fts_entries MATCH ?
-                ORDER BY score LIMIT ?
-            ''', (safe, limit)).fetchall()
+            if valid_rowids is not None:
+                # json_each avoids SQLite's bound-parameter ceiling for large filter sets.
+                rows = cur.execute('''
+                    SELECT rowid, bm25(fts_entries, 10.0, 1.0, 0.0) as score
+                    FROM fts_entries
+                    WHERE fts_entries MATCH ? AND rowid IN (SELECT value FROM json_each(?))
+                    ORDER BY score LIMIT ?
+                ''', (safe, json.dumps(list(valid_rowids)), limit)).fetchall()
+            else:
+                rows = cur.execute('''
+                    SELECT rowid, bm25(fts_entries, 10.0, 1.0, 0.0) as score
+                    FROM fts_entries WHERE fts_entries MATCH ?
+                    ORDER BY score LIMIT ?
+                ''', (safe, limit)).fetchall()
         except sqlite3.OperationalError:
             return []
         return [(int(r[0]), -r[1]) for r in rows]
@@ -293,6 +310,8 @@ class SearchEngine:
         source_half_lives: Optional[Dict[str, Optional[float]]] = None,
         hybrid: bool = False,
         rerank: bool = False,
+        fusion: str = 'rrf',
+        convex_alpha: float = 0.5,
         # Extension points
         entry_filter: Optional[Callable] = None,
         dedup_key: Optional[Callable] = None,
@@ -302,6 +321,10 @@ class SearchEngine:
         """Search the index.
 
         Args:
+            fusion: 'rrf' (default, rank-based Reciprocal Rank Fusion) or 'convex'
+                (score-based: convex_alpha*dense + (1-alpha)*bm25, each min-max
+                normalized over candidates). Only applies when hybrid=True.
+            convex_alpha: weight on the dense leg for convex fusion (default 0.5).
             entry_filter: Optional callable(entry) -> bool for custom filtering.
             dedup_key: Optional callable(result_dict) -> Optional[str] for dedup grouping.
             post_processors: List of callable(query, results, valid_indices) -> results.
@@ -335,17 +358,33 @@ class SearchEngine:
 
         # BM25
         bm25_ranks = {}
+        bm25_scores = {}
         if hybrid:
-            bm25_results = self._bm25_search(query, limit=200)
+            # Push the active filter into BM25 so its LIMIT isn't consumed by rows that
+            # would be filtered out (BM25 starvation). Dense already pre-filters exactly.
+            is_filtered = bool(sources) or entry_filter is not None or since is not None or min_similarity > 0
+            valid_rowids = valid if (is_filtered and len(valid) < len(self.entries)) else None
+            bm25_results = self._bm25_search(query, limit=200, valid_rowids=valid_rowids)
             rank = 0
-            for idx, _ in bm25_results:
+            for idx, score in bm25_results:
                 if idx in valid:
                     bm25_ranks[idx] = rank
+                    bm25_scores[idx] = score
                     rank += 1
 
         # Dense ranking
         dense_ranked = sorted(valid, key=lambda i: -sims[i])
         dense_ranks = {idx: rank for rank, idx in enumerate(dense_ranked)}
+
+        # For convex fusion: min-max normalize each leg's raw scores over the candidate set.
+        convex = hybrid and fusion == 'convex'
+        if convex:
+            dense_vals = [float(sims[i]) for i in valid]
+            d_lo, d_hi = (min(dense_vals), max(dense_vals)) if dense_vals else (0.0, 1.0)
+            b_vals = list(bm25_scores.values())
+            b_lo, b_hi = (min(b_vals), max(b_vals)) if b_vals else (0.0, 1.0)
+            def _mm(v, lo, hi):
+                return (v - lo) / (hi - lo) if hi > lo else 0.0
 
         # Score
         results = []
@@ -353,7 +392,11 @@ class SearchEngine:
             entry = self.entries[i]
             sim = float(sims[i])
 
-            if hybrid:
+            if convex:
+                d = _mm(sim, d_lo, d_hi)
+                b = _mm(bm25_scores[i], b_lo, b_hi) if i in bm25_scores else 0.0
+                base_score = convex_alpha * d + (1.0 - convex_alpha) * b
+            elif hybrid:
                 base_score = 1.0 / (RRF_K + dense_ranks[i])
                 if i in bm25_ranks:
                     base_score += 1.0 / (RRF_K + bm25_ranks[i])
