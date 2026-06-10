@@ -196,6 +196,35 @@ def test_convex_fusion_runs_and_orders(tmp_path):
     assert r_bm25[0]['id'] == 'keyword'
 
 
+def test_passage_windows():
+    from emb.search import passage_windows, RERANK_WINDOW_CHARS, RERANK_MAX_WINDOWS
+    assert passage_windows("short text") == ["short text"]          # fast path: one window
+    w = passage_windows("x" * 5000)
+    assert len(w) > 1 and all(len(p) <= RERANK_WINDOW_CHARS for p in w)
+    assert len(passage_windows("y" * 1_000_000)) <= RERANK_MAX_WINDOWS  # bounded
+
+
+def test_rerank_maxpool_finds_needle_past_char_500(tmp_path):
+    # The needle sits ~char 1400 — invisible to the old text[:500] truncation.
+    needle_doc = ("filler " * 200) + "NEEDLE_ANSWER " + ("filler " * 200)
+    path = _make_index([
+        {'id': 'has_needle', 'text': needle_doc, 'embedding': [0, 1, 0, 0]},
+        {'id': 'no_needle', 'text': 'totally unrelated content', 'embedding': [1, 0, 0, 0]},
+    ], tmp_path)
+    engine = SearchEngine(path)
+    engine._encode_query = lambda q: np.array([1, 0, 0, 0], dtype=np.float32)  # dense favors no_needle
+
+    class _MockRR:  # scores a window 1.0 iff it contains the needle
+        def predict(self, pairs):
+            return [1.0 if 'NEEDLE_ANSWER' in doc else 0.0 for _, doc in pairs]
+    engine._reranker = _MockRR()
+
+    results = engine.search("find the needle", top_k=2, rerank=True)
+    # Max-pool over windows surfaces the late-window needle → has_needle ranks #1,
+    # despite dense favoring no_needle and the needle living past char 500.
+    assert results[0]['id'] == 'has_needle'
+
+
 def test_chunk_deduplication(tmp_path):
     """Chunks from same parent should be deduped to best one."""
     path = _make_index([

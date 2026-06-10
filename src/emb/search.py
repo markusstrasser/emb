@@ -12,6 +12,28 @@ from emb.schema import Entry
 RRF_K = 60  # Reciprocal Rank Fusion constant
 DEFAULT_RERANKER = 'tomaarsen/Qwen3-Reranker-0.6B-seq-cls'
 
+# Passage-windowed reranking (BERT-MaxP). The cross-encoder scores the query against
+# OVERLAPPING windows of the FULL chunk and the doc takes its MAX window score — so
+# relevant content anywhere in the chunk surfaces, not just the head. Replaces a fixed
+# 500-char truncation that silently demoted needle-bearing docs (measured: needle
+# recall@5 was 1/10 with the truncated reranker vs 5/10 without it, 2026-06-10).
+RERANK_WINDOW_CHARS = 1200    # ~300 tokens — cross-encoder comfort zone
+RERANK_WINDOW_STRIDE = 800    # 400-char overlap → a needle near a boundary stays whole in ≥1 window
+RERANK_MAX_WINDOWS = 12       # per-doc bound (~10K chars covered); huge entries are sampled, not exploded
+
+
+def passage_windows(text: str, size: int = RERANK_WINDOW_CHARS,
+                    stride: int = RERANK_WINDOW_STRIDE, cap: int = RERANK_MAX_WINDOWS) -> List[str]:
+    """Overlapping char windows over the full text. Text ≤ size → a single window (fast path)."""
+    text = text or ''
+    if len(text) <= size:
+        return [text]
+    windows, start = [], 0
+    while start < len(text) and len(windows) < cap:
+        windows.append(text[start:start + size])
+        start += stride
+    return windows
+
 
 def expand_sources(sources: Set[str], groups: Dict[str, Set[str]]) -> Set[str]:
     """Expand source group aliases. e.g. {'health'} + groups → {'research','docs','healthkit'}"""
@@ -247,26 +269,46 @@ class SearchEngine:
             # Mac (2026-06-10). Refuse to load when RAM is critically low.
             require_ram(2.5, f"cross-encoder reranker {model}")
             from sentence_transformers import CrossEncoder
-            self._reranker = CrossEncoder(model)
+            # max_length caps each (query, window) pair at the token level; a 1200-char
+            # window (~300 tok) fits comfortably so windows are never internally truncated.
+            self._reranker = CrossEncoder(model, max_length=512)
         return self._reranker
 
     def _rerank(self, query: str, candidates: List[dict], top_k: int,
                 provenance: bool = False) -> List[dict]:
-        """Rerank candidates with cross-encoder."""
+        """Rerank candidates with a passage-windowed max-pool cross-encoder (BERT-MaxP).
+
+        Each candidate's FULL chunk is split into overlapping windows (title prepended to
+        each for doc context); the query is scored against every window and the candidate
+        takes its MAX window score. Relevant content anywhere in the chunk surfaces — the
+        old `text[:500]` truncation silently demoted any doc whose match lay past char 500.
+        """
         reranker = self._get_reranker()
         instruction = 'Given a web search query, retrieve relevant passages that answer the query.'
         prefixed = f'Instruct: {instruction}\nQuery: {query}'
-        pairs = []
-        for c in candidates:
+
+        pairs: List[Tuple[str, str]] = []
+        owners: List[int] = []  # pair index → candidate index
+        for ci, c in enumerate(candidates):
             e = c['entry']
-            doc = f"{e.title or ''} {e.text[:500]}"
-            pairs.append((prefixed, doc))
-        scores = reranker.predict(pairs)
-        for i, c in enumerate(candidates):
-            c['rerank_score'] = float(scores[i])
+            title = (e.title or '').strip()
+            for w in passage_windows(e.text or ''):
+                pairs.append((prefixed, f"{title}\n{w}" if title else w))
+                owners.append(ci)
+
+        scores = reranker.predict(pairs) if pairs else []
+        best = [float('-inf')] * len(candidates)
+        for s, ci in zip(scores, owners):
+            s = float(s)
+            if s > best[ci]:
+                best[ci] = s
+
+        for ci, c in enumerate(candidates):
+            c['rerank_score'] = best[ci] if best[ci] != float('-inf') else 0.0
             if provenance and 'provenance' in c:
-                c['provenance']['pre_rerank_rank'] = i
-                c['provenance']['rerank_score'] = round(float(scores[i]), 4)
+                c['provenance']['pre_rerank_rank'] = ci
+                c['provenance']['rerank_score'] = round(c['rerank_score'], 4)
+                c['provenance']['rerank_windows'] = sum(1 for o in owners if o == ci)
         candidates.sort(key=lambda x: x['rerank_score'], reverse=True)
         if provenance:
             for rank, c in enumerate(candidates[:top_k]):
