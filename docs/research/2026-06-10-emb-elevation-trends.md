@@ -59,6 +59,15 @@ Observed consumer pain points (from phenome code, not speculation):
 - Qwen3-Embedding license (claim 10 conflict) — verify on HF model card.
 - FAISS p95 numbers (claim 1) are single-B-grade-source; directionally consistent with claims 2-4 but don't quote them as gospel.
 
+## Addendum 2026-06-10 — anki as second consumer; backend scope (user direction)
+
+User: emb **will also serve anki**. Scope decisions from the follow-up:
+
+- **Anki gets embedding, not search.** Its jobs (duplicate detection >0.85, interference pairs 0.5-0.8) are all-pairs band similarity, not query→top-k — `SearchEngine` is irrelevant. Reuse: `EmbeddingEngine` (anki's `qwen3-embedding:8b-q8_0` is already in `KNOWN_MODELS`/ollama backend — deletes its hand-rolled HTTP + manual normalization), `EmbeddingCache`, plus one new `emb pairs` utility (all-pairs similarity within a band; two concrete callers in anki). No card-search caller exists → no SearchEngine wiring.
+- **Gemini backend: promoted to do.** Third `EmbeddingEngine` backend (`gemini`), absorbing phenome's `generate_gemini_embeddings.py` (real existing caller; May-29 eval keeps Gemini for abstract media; `google-genai` already an optional dep).
+- **Scientific (SPECTER2-style) embeddings: skip** — per-domain spaces break cross-source score comparability in phenome's one-shared-space design; no felt pain on paper retrieval. **Gene embeddings: no** — no caller, different modality (genomics outputs indexed as text narratives).
+- **agent-infra: not a consumer.** Verified no vector embeddings in corpus-core/corpus_mcp/git history; "selve" export path is legacy (selve gone). Its corpus reaches embeddings only via phenome's unified index. [DATA: grep sweep 2026-06-10]
+
 ## Search Log
 - Phase 0 dedup: found + reused `embedding-stack-upgrade-2026-05-29.md` (models + rerankers axes — skipped re-research).
 - Explore agent: consumer sweep of ~/Projects (phenome sole consumer).
