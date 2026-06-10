@@ -34,3 +34,7 @@ uv.lock
 # OS
 .DS_Store
 Thumbs.db
+
+# Agent session artifacts (plans are session-scoped, reviews are audit trails)
+.claude/plans/
+.model-review/
