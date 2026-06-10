@@ -1,6 +1,6 @@
 # emb — Maintainer Handoff & Architecture
 
-**Last updated:** 2026-06-10 · **Audience:** the next agent/maintainer of `emb` and its consumers.
+**Last updated:** 2026-06-11 (rerank fix validated; topical lane built, emb half 4/10) · **Audience:** the next agent/maintainer of `emb` and its consumers.
 **Stance:** breaking changes welcome; no backward-compat shims, no legacy wrappers. Keep the
 representation deep and the surface small. This doc is living — update it when the design moves.
 
@@ -81,8 +81,15 @@ strictly more of the doc). `CrossEncoder(max_length=512)` so a window is never i
 12-window cap). For a personal lib the quality win dominates; if latency bites, lower
 `RERANK_MAX_WINDOWS` or pre-cap candidate text. Tunable, no code change needed.
 
-**⚠ NOT yet empirically re-validated** (the unit test proves the *mechanism*; the real-corpus
-number is unmeasured). See §6 item 1.
+**✓ Empirically validated 2026-06-11** (`evals/retrieval_backend_bakeoff`, needle lane re-run):
+recall@5 went **1/10 → 5/10** (= no-rerank). Per-query: 2 buried-needle *rescues* (the windowing
+mechanism working) and 2 *demotions* (no longer truncation — the 0.6B model's own judgment over
+the 100-doc pool; "Drowning in Documents" arXiv:2411.11767 predicts exactly this for small
+rerankers on deep pools). Topical interim points the same way (rerank 1/4 vs hybrid 4/4).
+**Net: harm eliminated, headroom is in pool depth, not windowing.** Measured cost: ~4–6 min/query
+(CPU, 4 threads, pool=100, long docs) — fine for batch, heavy for interactive; see
+`docs/research/2026-06-10-reranker-frontier-check.md` for the evidence-backed latency program
+(pool 25–50 → gte-reranker-modernbert-base swap → window pruning → ONNX INT8).
 
 ---
 
@@ -112,16 +119,29 @@ Bake-off: `~/Projects/evals/retrieval_backend_bakeoff/` (canonical; not in emb).
 
 ## 6. Open items (next steps, with exact commands)
 
-1. **Empirically re-validate the §3 rerank fix.** Re-run the recall lane with the new windowed reranker; expect emb+rerank to recover from 1/10 toward/past 5/10 (a needle now scores via its window).
+1. **Finish the emb topical lane** (4/10 checkpointed; killed after 3 swap-evictions — resumable,
+   skips scored queries). Interim: hybrid 4/4 (incl. 2 docs FS missed), rerank 1/4. FS topical = 6/10.
    ```bash
-   # SAFE: one job, foreground, no MPS fallback, RAM-guarded. ~15-20 min CPU. Run on a QUIET machine.
+   # ~30 min on a QUIET machine (quiet = no other torch jobs AND minimal agent sessions — §7).
    cd ~/Projects/intel && OMP_NUM_THREADS=4 TOKENIZERS_PARALLELISM=false \
-     uv run python3 ~/Projects/evals/retrieval_backend_bakeoff/recall_local.py
+     uv run python3 ~/Projects/evals/retrieval_backend_bakeoff/topical_recall.py emb
    ```
-   Then update `EXPERIMENT.md §4` + the `intel-search-backend` DECISIONS row. **Do NOT** run it alongside another torch job (see §7).
-2. **Build the topical-query lane** for the bake-off — confirm v1's topical parity holds under rigor. If emb ties FS on topical AND the rerank fix recovers needles, the local-emb verdict becomes unconditional.
-3. **anki interference band** (0.74–0.85) is gemini-calibrated provisionally — validate against real confusion pairs over time; re-tune if the model changes.
-4. **(Optional, deeper)** File Search's only durable edge is *chunk granularity*. If needle retrieval becomes important for a consumer, the right emb answer is finer/multi-granularity chunking (chunk + section + doc), not adopting FS. Don't build until a consumer needs it.
+   Then: write the topical section into `EXPERIMENT.md` (FS 6/10 + kw-baseline 0/10 are final),
+   finalize the `intel-search-backend` DECISIONS row, and re-stamp this doc. If hybrid holds ≥
+   FS's 6/10, the local-emb verdict becomes unconditional (needle edge = FS's only win, already
+   priced into the RQ2 trade).
+2. **Pool-depth sweep {25,50,100}** on both lanes — the evidence-backed next lever (4 of 5 rerank
+   demotions tonight are pool-judgment errors; arXiv:2411.11767 says deep pools + small rerankers
+   degrade recall). Config-only change; expect 25–50 to match or beat 100 at ~4× less compute.
+3. **Reranker latency program** (after the sweep): evaluate `gte-reranker-modernbert-base` (149M
+   encoder, 8192 ctx — kills most windowing, ONNX-able) vs Qwen3-Reranker-0.6B on these same lanes;
+   then window pruning (cross-encode top-3 windows by dense score — quality-positive per EviRerank);
+   then ONNX INT8. Full evidence + sequencing: `docs/research/2026-06-10-reranker-frontier-check.md`.
+4. **anki interference band** (0.74–0.85) is gemini-calibrated provisionally — validate against real
+   confusion pairs over time; re-tune if the model changes.
+5. **(Optional, deeper)** File Search's only durable edge is *chunk granularity*. If needle retrieval
+   becomes important for a consumer, the right emb answer is finer/multi-granularity chunking
+   (chunk + section + doc), not adopting FS. Don't build until a consumer needs it.
 
 ---
 
