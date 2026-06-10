@@ -47,6 +47,10 @@ def find_pairs(
     n = embeddings.shape[0]
     if n < 2:
         return []
+    if block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
+    if top_k is not None and top_k <= 0:
+        return []  # asking for the top-0 partners of each item → no pairs
     emb = np.ascontiguousarray(embeddings, dtype=np.float32)
 
     if top_k is None:

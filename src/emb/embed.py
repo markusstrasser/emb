@@ -33,6 +33,8 @@ def model_slug(model_name: str) -> str:
 def _l2_normalize(vectors: List[List[float]]) -> List[List[float]]:
     """L2-normalize a batch of vectors. Central invariant: every embedding emb
     returns is unit-norm regardless of backend (idempotent for already-normalized)."""
+    if not vectors:
+        return []  # empty in → empty out (np.asarray([]) would reshape to a phantom (1,0) row)
     arr = np.asarray(vectors, dtype=np.float32)
     if arr.ndim == 1:
         arr = arr.reshape(1, -1)
@@ -166,7 +168,16 @@ class EmbeddingEngine:
                         model=self.model, contents=chunk,
                         config=types.EmbedContentConfig(output_dimensionality=self.dim),
                     )
-                    out.extend(list(e.values) for e in resp.embeddings)
+                    vals = [list(e.values) for e in resp.embeddings]
+                    # Cardinality guard: the API must return exactly one embedding per
+                    # Content. A mismatch (e.g. silent fusion) would misalign every
+                    # downstream zip(items, vecs) and poison the content-hash cache.
+                    if len(vals) != len(chunk):
+                        raise RuntimeError(
+                            f"Gemini returned {len(vals)} embeddings for {len(chunk)} inputs "
+                            f"— refusing to cache misaligned vectors."
+                        )
+                    out.extend(vals)
                     break
                 except Exception as e:
                     msg = str(e)

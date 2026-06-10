@@ -66,6 +66,17 @@ def test_sorted_descending():
     assert sims == sorted(sims, reverse=True)
 
 
+def test_invalid_block_size_raises():
+    emb = _normed([[1.0, 0.0], [0.9, 0.1]])
+    with pytest.raises(ValueError):
+        find_pairs(emb, block_size=0)
+
+
+def test_nonpositive_top_k_returns_empty():
+    emb = _normed([[1.0, 0.0], [0.9, 0.1], [0.0, 1.0]])
+    assert find_pairs(emb, threshold=0.0, top_k=0) == []
+
+
 def test_iter_matches_find():
     rng = np.random.default_rng(5)
     emb = _normed(rng.standard_normal((40, 8)))

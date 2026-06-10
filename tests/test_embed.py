@@ -29,6 +29,11 @@ def test_l2_normalize_invariant():
     assert np.allclose(out[1], [0.0, 0.0])  # zero vector stays zero (no div-by-zero)
 
 
+def test_l2_normalize_empty():
+    # Regression: np.asarray([]) reshapes to a phantom (1,0) row → must return [] not [[]]
+    assert _l2_normalize([]) == []
+
+
 def test_embed_texts_normalizes_unnormalized_backend_output():
     # Backend returns NON-normalized vectors; embed_texts must enforce unit norm.
     engine = EmbeddingEngine(dim=3)

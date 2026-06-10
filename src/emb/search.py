@@ -207,6 +207,10 @@ class SearchEngine:
         filter starves the BM25 leg — top-200 corpus-wide hits might contain only a
         handful of matching rows, while the dense leg sees every matching row. This
         is the one real truncation surface in hybrid search (dense pre-filters exactly).
+
+        Invariant (load-bearing for valid_rowids): FTS rowid == the entry's enumerate
+        index in self.entries (see _ensure_fts_index, which inserts rowid=i), which is
+        the SAME index space as `valid`. So `rowid IN (valid_rowids)` filters correctly.
         """
         self._ensure_fts_index()
         safe = self._fts5_safe_query(query)
@@ -228,7 +232,11 @@ class SearchEngine:
                     FROM fts_entries WHERE fts_entries MATCH ?
                     ORDER BY score LIMIT ?
                 ''', (safe, limit)).fetchall()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as e:
+            # A malformed FTS query degrades hybrid → dense-only. Surface it rather
+            # than silently dropping the BM25 leg.
+            import sys
+            print(f"  Warning: BM25 query failed ({e}); hybrid degraded to dense-only", file=sys.stderr)
             return []
         return [(int(r[0]), -r[1]) for r in rows]
 
@@ -378,6 +386,7 @@ class SearchEngine:
 
         # For convex fusion: min-max normalize each leg's raw scores over the candidate set.
         convex = hybrid and fusion == 'convex'
+        convex_alpha = min(1.0, max(0.0, convex_alpha))  # clamp to [0,1]
         if convex:
             dense_vals = [float(sims[i]) for i in valid]
             d_lo, d_hi = (min(dense_vals), max(dense_vals)) if dense_vals else (0.0, 1.0)
@@ -452,8 +461,12 @@ class SearchEngine:
             for proc in post_processors:
                 results = proc(query, results, valid)
 
-        # Dedup + rerank pool
-        pool_size = top_k * 3 if rerank else top_k
+        # Dedup + rerank pool. The rerank candidate pool is deliberately generous
+        # (max(top_k*5, 100)): a cross-encoder can only pull up a relevant doc that the
+        # dense/RRF stage ranked low if that doc is IN the pool. This is the right place
+        # to control rerank recall — callers must NOT inflate top_k to widen it (the old
+        # phenome fetch_k=top_k*5 hack did that, coupling final-result count to pool size).
+        pool_size = max(top_k * 5, 100) if rerank else top_k
         results = self._deduplicate(results, pool_size, dedup_key=dedup_key)
 
         if rerank and results:
