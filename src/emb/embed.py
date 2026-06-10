@@ -71,6 +71,47 @@ def compute_content_hash(text: str) -> str:
     return hashlib.md5(text.encode('utf-8')).hexdigest()
 
 
+def _available_ram_gb() -> Optional[float]:
+    """Best-effort available RAM in GB. None if undeterminable (then skip the guard)."""
+    import sys
+    try:
+        with open('/proc/meminfo') as f:  # Linux
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    return int(line.split()[1]) / (1024 * 1024)
+    except Exception:
+        pass
+    if sys.platform == 'darwin':
+        try:
+            import re, subprocess
+            out = subprocess.run(['vm_stat'], capture_output=True, text=True, timeout=5).stdout
+            m = re.search(r'page size of (\d+)', out)
+            page = int(m.group(1)) if m else 16384
+            pages = 0
+            for key in ('Pages free', 'Pages inactive', 'Pages speculative'):
+                mm = re.search(rf'{key}:\s+(\d+)', out)
+                if mm:
+                    pages += int(mm.group(1))
+            return pages * page / (1024 ** 3)
+        except Exception:
+            return None
+    return None
+
+
+def require_ram(min_gb: float, what: str) -> None:
+    """Refuse to load a heavy model when RAM is critically low — a clear error beats a
+    silent OOM-freeze (2026-06-10: a reranker load at ~86MB free hard-froze the Mac).
+    Best-effort: if available RAM can't be determined, proceeds (never false-blocks)."""
+    avail = _available_ram_gb()
+    if avail is not None and avail < min_gb:
+        raise RuntimeError(
+            f"Refusing to load {what}: needs ~{min_gb:.1f}GB free, only {avail:.1f}GB available. "
+            f"Loading under memory pressure can OOM-freeze the machine. Free RAM "
+            f"(kill other model jobs: `ps -axo rss,pid,command | sort -rn | head`), "
+            f"reduce concurrent jobs, or offload to Modal."
+        )
+
+
 class EmbeddingEngine:
     """Generate embeddings with caching and incremental updates."""
 
@@ -96,6 +137,7 @@ class EmbeddingEngine:
     def _get_st_model(self):
         """Lazy-load sentence-transformers model, confirming download if needed."""
         if self._st_model is None:
+            require_ram(1.5, f"embedding model {self.model}")
             if not _model_is_cached(self.model):
                 if not _confirm_model_download(self.model):
                     raise SystemExit("Model download declined.")

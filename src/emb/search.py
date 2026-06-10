@@ -242,6 +242,10 @@ class SearchEngine:
 
     def _get_reranker(self, model: str = DEFAULT_RERANKER):
         if self._reranker is None:
+            from emb.embed import require_ram
+            # The cross-encoder over a full index is THE workload that OOM-froze the
+            # Mac (2026-06-10). Refuse to load when RAM is critically low.
+            require_ram(2.5, f"cross-encoder reranker {model}")
             from sentence_transformers import CrossEncoder
             self._reranker = CrossEncoder(model)
         return self._reranker
