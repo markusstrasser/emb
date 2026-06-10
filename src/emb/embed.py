@@ -14,9 +14,31 @@ from emb.cache import EmbeddingCache
 KNOWN_MODELS = {
     'Alibaba-NLP/gte-modernbert-base': (768, 'sentence-transformers', 64),
     'qwen3-embedding:8b-q8_0': (4096, 'ollama', 16),
+    'gemini-embedding-2-preview': (768, 'gemini', 100),  # Gemini API caps at 100 Content/request
 }
 
 DEFAULT_MODEL = 'Alibaba-NLP/gte-modernbert-base'
+
+
+def model_slug(model_name: str) -> str:
+    """Filesystem-safe slug for a model name, used to namespace caches by model.
+
+    Two models that share a dimension (gte-768 vs gemini-768) produce vectors in
+    incompatible spaces; namespacing the cache by slug prevents silent wrong-vector
+    cache hits that a dim check alone cannot catch.
+    """
+    return model_name.replace('/', '_').replace(':', '_')
+
+
+def _l2_normalize(vectors: List[List[float]]) -> List[List[float]]:
+    """L2-normalize a batch of vectors. Central invariant: every embedding emb
+    returns is unit-norm regardless of backend (idempotent for already-normalized)."""
+    arr = np.asarray(vectors, dtype=np.float32)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    norms = np.linalg.norm(arr, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return (arr / norms).tolist()
 
 
 def _model_is_cached(model_name: str) -> bool:
@@ -67,6 +89,7 @@ class EmbeddingEngine:
         self.ollama_url = ollama_url
         self.max_chars = max_chars
         self._st_model = None  # lazy
+        self._gemini_client = None  # lazy
 
     def _get_st_model(self):
         """Lazy-load sentence-transformers model, confirming download if needed."""
@@ -83,7 +106,7 @@ class EmbeddingEngine:
         return self._st_model
 
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
-        """Embed a batch of texts. Returns normalized embeddings."""
+        """Embed a batch of texts. Returns L2-normalized embeddings (central invariant)."""
         truncated = []
         n_truncated = 0
         for t in texts:
@@ -96,8 +119,14 @@ class EmbeddingEngine:
             import sys
             print(f"  Warning: {n_truncated} text(s) truncated to {self.max_chars} chars", file=sys.stderr)
         if self.backend == 'ollama':
-            return self._embed_ollama(truncated)
-        return self._embed_st(truncated)
+            raw = self._embed_ollama(truncated)
+        elif self.backend == 'gemini':
+            raw = self._embed_gemini(truncated)
+        else:
+            raw = self._embed_st(truncated)
+        # Central normalization invariant — every vector emb returns is unit-norm,
+        # regardless of backend. Idempotent for backends that already normalize.
+        return _l2_normalize(raw)
 
     def _embed_st(self, texts: List[str]) -> List[List[float]]:
         model = self._get_st_model()
@@ -113,14 +142,73 @@ class EmbeddingEngine:
         )
         resp = urllib_request.urlopen(req, timeout=300)
         result = json.loads(resp.read())
-        normed = []
-        for emb in result['embeddings']:
-            arr = np.array(emb, dtype=np.float32)
-            norm = np.linalg.norm(arr)
-            if norm > 0:
-                arr = arr / norm
-            normed.append(arr.tolist())
-        return normed
+        return result['embeddings']
+
+    def _get_gemini_client(self):
+        """Lazy-init google-genai client (reads GEMINI_API_KEY from env)."""
+        if self._gemini_client is None:
+            from google import genai
+            self._gemini_client = genai.Client()
+        return self._gemini_client
+
+    def _gemini_embed_contents(self, contents: list) -> List[List[float]]:
+        """Embed a list of google.genai Content objects, chunked to the 100/request
+        API cap, with 429 retry/backoff. Returns raw (unnormalized) vectors."""
+        from google.genai import types
+        client = self._get_gemini_client()
+        out: List[List[float]] = []
+        cap = min(self.batch_size, 100)  # Gemini caps at 100 Content/request
+        for start in range(0, len(contents), cap):
+            chunk = contents[start:start + cap]
+            for attempt in range(5):
+                try:
+                    resp = client.models.embed_content(
+                        model=self.model, contents=chunk,
+                        config=types.EmbedContentConfig(output_dimensionality=self.dim),
+                    )
+                    out.extend(list(e.values) for e in resp.embeddings)
+                    break
+                except Exception as e:
+                    msg = str(e)
+                    if ('429' in msg or 'RESOURCE_EXHAUSTED' in msg or '503' in msg) and attempt < 4:
+                        time.sleep(min(60, 4 * (2 ** attempt)))
+                        continue
+                    raise
+        return out
+
+    def _embed_gemini(self, texts: List[str]) -> List[List[float]]:
+        """Embed texts via Gemini. CRITICAL: each text MUST be its own Content —
+        a bare list[str] is fused by the API into a single embedding (Phase-0 trap)."""
+        from google.genai import types
+        contents = [types.Content(parts=[types.Part(text=t)]) for t in texts]
+        return self._gemini_embed_contents(contents)
+
+    def embed_media(self, items: List[Tuple]) -> np.ndarray:
+        """Embed multimodal items via Gemini's native multi-part fusion.
+
+        Each item is (data, mime, description):
+          - data: raw bytes, or a str/Path to a file (read as bytes)
+          - mime: e.g. 'image/png', 'image/gif', 'image/jpeg', 'audio/mpeg'
+          - description: optional text fused with the media in one Content (front/back
+            card text, caption, etc.). Empty string → media-only.
+
+        No document parsing happens here (PDF→image extraction stays consumer-side).
+        Returns an (N, dim) L2-normalized float32 array. Gemini backend only.
+        """
+        if self.backend != 'gemini':
+            raise ValueError(f"embed_media requires the gemini backend, not {self.backend!r}")
+        from google.genai import types
+        contents = []
+        for data, mime, description in items:
+            if isinstance(data, (str, Path)):
+                data = Path(data).read_bytes()
+            parts = []
+            if description:
+                parts.append(types.Part(text=description))
+            parts.append(types.Part.from_bytes(data=data, mime_type=mime))
+            contents.append(types.Content(parts=parts))
+        raw = self._gemini_embed_contents(contents)
+        return np.asarray(_l2_normalize(raw), dtype=np.float32)
 
     def _embed_adaptive(self, texts: List[str]) -> List[List[float]]:
         """Embed with adaptive batch halving on OOM."""

@@ -1,8 +1,43 @@
+import numpy as np
 import pytest
 from unittest.mock import patch, MagicMock
-from emb.embed import EmbeddingEngine, compute_content_hash, KNOWN_MODELS
+from emb.embed import EmbeddingEngine, compute_content_hash, KNOWN_MODELS, model_slug, _l2_normalize
 from emb.schema import Entry
 from emb.cache import EmbeddingCache
+
+
+def test_model_slug():
+    assert model_slug('Alibaba-NLP/gte-modernbert-base') == 'Alibaba-NLP_gte-modernbert-base'
+    assert model_slug('qwen3-embedding:8b-q8_0') == 'qwen3-embedding_8b-q8_0'
+    assert model_slug('gemini-embedding-2-preview') == 'gemini-embedding-2-preview'
+    # gte-768 and gemini-768 share a dim but get distinct slugs (the whole point)
+    assert model_slug('Alibaba-NLP/gte-modernbert-base') != model_slug('gemini-embedding-2-preview')
+
+
+def test_gemini_registered():
+    engine = EmbeddingEngine(model='gemini-embedding-2-preview')
+    assert engine.dim == 768
+    assert engine.backend == 'gemini'
+    assert engine.batch_size == 100
+
+
+def test_l2_normalize_invariant():
+    out = _l2_normalize([[3.0, 4.0], [0.0, 0.0], [1.0, 1.0]])
+    norms = np.linalg.norm(np.array(out), axis=1)
+    assert np.allclose(norms[0], 1.0)
+    assert np.allclose(norms[2], 1.0)
+    assert np.allclose(out[1], [0.0, 0.0])  # zero vector stays zero (no div-by-zero)
+
+
+def test_embed_texts_normalizes_unnormalized_backend_output():
+    # Backend returns NON-normalized vectors; embed_texts must enforce unit norm.
+    engine = EmbeddingEngine(dim=3)
+    mock_model = MagicMock()
+    mock_model.encode.return_value = np.array([[3.0, 0.0, 0.0], [0.0, 5.0, 0.0]], dtype=np.float32)
+    engine._st_model = mock_model
+    result = engine.embed_texts(["a", "b"])
+    norms = np.linalg.norm(np.array(result), axis=1)
+    assert np.allclose(norms, 1.0), f"central normalize invariant violated: {norms}"
 
 
 def test_compute_content_hash():
