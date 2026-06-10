@@ -128,8 +128,13 @@ Bake-off: `~/Projects/evals/retrieval_backend_bakeoff/` (canonical; not in emb).
 ## 7. Operational safety (LEARNED THE HARD WAY — read before running anything heavy)
 
 On 2026-06-10 three parallel torch eval jobs (each: embedding model + cross-encoder over a full
-index, with `PYTORCH_ENABLE_MPS_FALLBACK=1` spilling oversized tensors to CPU RAM) hit ~44 GB on a
-36 GB Mac → OOM freeze → forced reboot. Guards now in place:
+index, with `PYTORCH_ENABLE_MPS_FALLBACK=1` spilling oversized tensors to CPU RAM) hit ~44 GB of
+demand on an **18 GB** Mac (`sysctl hw.memsize`; an earlier version of this doc wrongly said 36 GB)
+→ OOM freeze → forced reboot. Same evening, a SECOND incident refined the lesson: a single
+well-behaved torch eval (no MPS fallback, ~7 GB) was evicted to swap mid-run by **aggregate agent
+load** — 8 concurrent claude sessions + node tooling — and stalled unrecoverably in uninterruptible
+swap-thrash (RSS 10 MB, state U; SIGKILL queued for minutes). "Quiet machine" means quiet of agent
+sessions too, not just torch jobs. Guards now in place:
 
 - **Never run >1 local model/rerank job at once.** `pretool-heavy-load-guard.sh` BLOCKS a new heavy
   job when any python is already resident >8 GB (name-independent RAM signal).
