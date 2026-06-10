@@ -68,6 +68,21 @@ User: emb **will also serve anki**. Scope decisions from the follow-up:
 - **Scientific (SPECTER2-style) embeddings: skip** — per-domain spaces break cross-source score comparability in phenome's one-shared-space design; no felt pain on paper retrieval. **Gene embeddings: no** — no caller, different modality (genomics outputs indexed as text narratives).
 - **agent-infra: not a consumer.** Verified no vector embeddings in corpus-core/corpus_mcp/git history; "selve" export path is legacy (selve gone). Its corpus reaches embeddings only via phenome's unified index. [DATA: grep sweep 2026-06-10]
 
+## Correction + CAG economics 2026-06-10 (supersedes recommendation 1)
+
+**Scale correction:** phenome's unified index is **72,045 entries** (768d, 211MB npy, 155MB jsonl ≈ 54M tokens) [DATA: `indexed/unified/metadata.json`, 2026-06-10]. The Explore agent's "2.3M entries" was wrong by ~30×. At 72K vectors, brute-force numpy is ~5ms and 211MB — **there is no dense-speed or memory problem. Recommendation 1 (usearch ANN+int8) is DEFERRED until the index approaches ~500K-1M entries.** Filter pushdown (rec 2) stands — it's a quality fix (K-truncation), not a speed fix. Claim 1's relevance was overstated by the bad scale number; the benchmark numbers themselves stand.
+
+**"Why not just span Gemini Flash over everything?"** (user question) — verified pricing 2026-06: gemini-3.1-flash-lite $0.25/$1.50 per MTok (1M ctx), gemini-3-flash $0.50/$3, gemini-3.5-flash $1.50/$9; batch/flex −50%, context caching up to −90% on cached reads; >200K-token prompts can trigger long-context rates on Vertex [SOURCE: costgoat.com/pricing/gemini-api, openrouter.ai, metacto.com — 3 sources agree].
+
+At 54M corpus tokens:
+- **Full-corpus CAG** = ~57 shards × 1M → **~$13.5/query** list ($7 flex) and ~4-7 min at 6 workers (emb's cag.py map-reduce). vs $0 / <10ms local search. Not a default; an exhaustive-recall mode.
+- **Slice CAG** (one source / time window, 1-3M tokens) = $0.25-0.75, 30-90s. This is what `--cag` post-filter already does — the right shape.
+- **Hybrid read stage** (search → top-200 → ~100-300K tokens → flash-lite) = **$0.03-0.08/query**. The sweet spot.
+
+**What people actually do, June 2026** [SOURCE: 10-source trend sweep above]: nobody spans multi-10M-token corpora per query. The consensus is **locate with a cheap index, read with a long-context model** — indexes retrieve coarser units (whole docs/sections, not chunks) and the LLM reads a fat slice; agentic loops (grep+BM25+dense+read as tools) handle the iterative cases; pure CAG is the standard only for corpora that FIT the window (<1M tokens, stable, repeat-queried → context caching makes re-reads ~90% cheaper). Long-context degradation over lexically-mismatched content keeps effective recall below nominal window size [TRAINING-DATA: NoLiMa/RULER-class results, pre-frontier but uncontradicted by the 2026 practitioner sources].
+
+**Implication for emb:** the architecture is already the June-2026 shape. The upgrade is making CAG the *read stage* of search (search/filter → slice → span) rather than an either/or bypass — i.e., a `--read`/synthesis mode that feeds top-k or a filtered slice to flash-lite, with full-corpus spanning reserved for explicit exhaustive queries. Anki's corpus (~0.3-1.5M tokens of cards) is the one consumer that genuinely fits in-window, but its jobs are all-pairs similarity, not generation — CAG doesn't apply there either.
+
 ## Search Log
 - Phase 0 dedup: found + reused `embedding-stack-upgrade-2026-05-29.md` (models + rerankers axes — skipped re-research).
 - Explore agent: consumer sweep of ~/Projects (phenome sole consumer).
