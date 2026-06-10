@@ -141,20 +141,22 @@ class SearchEngine:
         self._reranker = None  # lazy
 
     def _encode_query(self, query: str) -> np.ndarray:
-        """Encode query string to embedding vector."""
+        """Encode query string to embedding vector via the SAME backend that built
+        the index (read from metadata['embedding_model']). A query encoded by a
+        different model than the index lives in an incompatible space — so an
+        unknown model is a hard error, never a silent SentenceTransformer default."""
         if self._embedding_model is None:
-            from emb.embed import _model_is_cached, _confirm_model_download
-            if not _model_is_cached(self._model_name):
-                if not _confirm_model_download(self._model_name):
-                    raise SystemExit("Model download declined.")
-            from sentence_transformers import SentenceTransformer
-            self._embedding_model = SentenceTransformer(
-                self._model_name, trust_remote_code=True
-            )
-        emb = self._embedding_model.encode(
-            [query], normalize_embeddings=True
-        )[0]
-        return np.array(emb, dtype=np.float32)
+            from emb.embed import EmbeddingEngine, KNOWN_MODELS
+            if self._model_name not in KNOWN_MODELS:
+                raise ValueError(
+                    f"Index was built with model {self._model_name!r}, which is not in "
+                    f"KNOWN_MODELS ({sorted(KNOWN_MODELS)}). Refusing to encode the query "
+                    f"with a default model — that would query the wrong embedding space. "
+                    f"Register the model in emb.embed.KNOWN_MODELS first."
+                )
+            self._embedding_model = EmbeddingEngine(model=self._model_name)
+        vec = self._embedding_model.embed_texts([query])[0]
+        return np.array(vec, dtype=np.float32)
 
     def _ensure_fts_index(self):
         """Build FTS5 index lazily."""
