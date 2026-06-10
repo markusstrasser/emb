@@ -33,15 +33,17 @@ def embed(
     overlap_tokens: int = typer.Option(50, "--overlap-tokens", help="Overlap words between chunks"),
     force: bool = typer.Option(False, "--force", help="Force re-embed all (ignore cache)"),
     scales: str = typer.Option(None, "--scales", help="Multi-scale chunk sizes, comma-separated (e.g. '200,500')"),
-    fmt: str = typer.Option("split", "--format", "-f", help="Output format: split (directory) or json"),
 ):
-    """Embed entries from JSONL into a searchable index."""
+    """Embed entries from JSONL into a searchable split index.
+
+    Always writes the split format (entries.jsonl + mmap embeddings.npy + metadata.json).
+    To read or migrate a legacy monolithic-JSON index, use `emb convert`.
+    """
     import numpy as np
     from emb.io import read_jsonl
     from emb.embed import EmbeddingEngine
     from emb.cache import EmbeddingCache
     from emb.chunking import chunk_entries, multiscale_chunk_entries
-    from datetime import datetime
 
     # Read input
     console.print(f"Reading entries from {input_file}...")
@@ -85,35 +87,11 @@ def embed(
         'embedding_dim': engine.dim,
     }
 
-    if fmt == 'split':
-        from emb.index import write_index
-        embeddings = np.array([e.embedding for e in entries], dtype=np.float32)
-        write_index(entries, embeddings, output, meta)
-        # Calculate total size
-        total_bytes = sum(f.stat().st_size for f in output.iterdir())
-        console.print(f"  Split index written: {output}/ ({total_bytes / 1024 / 1024:.1f} MB, {len(entries)} entries)")
-    else:
-        # Legacy JSON format
-        index_data = {
-            'metadata': {
-                'total_entries': len(entries),
-                'sources': {},
-                'embedding_model': engine.model,
-                'embedding_dim': engine.dim,
-                'generated_at': datetime.now().isoformat(),
-            },
-            'entries': [e.to_dict() for e in entries],
-        }
-        for e in entries:
-            s = e.source or 'unknown'
-            index_data['metadata']['sources'][s] = index_data['metadata']['sources'].get(s, 0) + 1
-
-        output.parent.mkdir(parents=True, exist_ok=True)
-        with open(output, 'w') as f:
-            json.dump(index_data, f)
-
-        size_mb = output.stat().st_size / 1024 / 1024
-        console.print(f"  Index written: {output} ({size_mb:.1f} MB, {len(entries)} entries)")
+    from emb.index import write_index
+    embeddings = np.array([e.embedding for e in entries], dtype=np.float32)
+    write_index(entries, embeddings, output, meta)
+    total_bytes = sum(f.stat().st_size for f in output.iterdir())
+    console.print(f"  Split index written: {output}/ ({total_bytes / 1024 / 1024:.1f} MB, {len(entries)} entries)")
 
 
 @app.command()

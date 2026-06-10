@@ -1,6 +1,8 @@
 # emb
 
-Embed, index, and search text corpora. Dense + BM25 hybrid search, RRF fusion, cross-encoder reranking, freshness weighting, spreading activation.
+Embed, index, and search text (and multimodal) corpora. Dense + BM25 hybrid search, RRF/convex fusion, cross-encoder reranking, freshness weighting, spreading activation, all-pairs similarity, and a long-context read stage.
+
+Backends: `sentence-transformers` (local, default), `ollama`, and `gemini` (multimodal — text + image/audio via Gemini Embedding 2). Every vector is L2-normalized regardless of backend; caches are namespaced by model slug so same-dimension models in different spaces never collide.
 
 ## Install
 
@@ -24,13 +26,20 @@ emb search my_index/ --interactive
 # Index info
 emb info my_index/
 
-# Convert between formats
+# Find all high-similarity PAIRS within a corpus (duplicates, interference)
+emb pairs my_index/ --threshold 0.85 -o pairs.jsonl
+emb pairs my_index/ --threshold 0.50 --max-threshold 0.80   # interference band
+
+# Locate-then-read: hybrid search, then span a long-context model over only the hits
+emb read my_index/ "what did I conclude about X?" --top-k 200   # cost-preflighted
+
+# Convert a legacy monolithic-JSON index to split format (read path)
 emb convert legacy.json split_dir/    # JSON → split
 emb convert split_dir/ output.json    # split → JSON
-
-# Legacy JSON format (not recommended for large indices)
-emb embed input.jsonl -o index.json --format json
 ```
+
+`emb embed` always writes the split format. Multimodal indexes (gemini backend) are
+built via the Python API (`EmbeddingEngine.embed_media`); see below.
 
 ### Input format
 
@@ -141,10 +150,29 @@ my_index/
   embeddings.npy      # float32 (N × dim), mmap-able
 ```
 
-**JSON (legacy):** Single file with entries + embeddings inline. Works but 4x larger and can't be mmap'd.
+**JSON (legacy):** Single file with entries + embeddings inline. Read-only via `emb convert` / `SearchEngine`; `emb embed` no longer writes it (4x larger, can't be mmap'd).
+
+## Multimodal (Gemini Embedding 2)
+
+```python
+from emb.embed import EmbeddingEngine
+
+engine = EmbeddingEngine(model="gemini-embedding-2-preview")  # needs emb[gemini] + GEMINI_API_KEY
+
+# Text (each item is its own Content — required; a bare list[str] would fuse to one vector)
+vecs = engine.embed_texts(["front/back card text", "another"])
+
+# Multimodal: each item is (description, [(data_or_path, mime), ...]) fused into one embedding
+M = engine.embed_media([
+    ("stop sign card front/back", [("card.png", "image/png")]),  # text + image
+    ("", [("diagram.png", "image/png")]),                         # image-only (e.g. occlusion)
+])
+```
 
 ## Models
 
-Default: `Alibaba-NLP/gte-modernbert-base` (768d, 8K context). Downloaded on first use with confirmation prompt.
+Default: `Alibaba-NLP/gte-modernbert-base` (768d, 8K context, local). Downloaded on first use with confirmation prompt.
+
+Multimodal: `gemini-embedding-2-preview` (768d, text + image/audio) via `emb[gemini]`.
 
 Reranker (optional, with `--rerank`): `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`.
