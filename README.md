@@ -175,4 +175,7 @@ Default: `Alibaba-NLP/gte-modernbert-base` (768d, 8K context, local). Downloaded
 
 Multimodal: `gemini-embedding-2-preview` (768d, text + image/audio) via `emb[gemini]`.
 
-Reranker (optional, with `--rerank`): `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`.
+Reranker (optional, with `--rerank`): `Alibaba-NLP/gte-reranker-modernbert-base` (149M,
+passage-windowed MaxP). **Opt-in after eval, not free insurance** — on the intel corpus no
+rerank config beat hybrid-alone (it demoted more than it rescued); validate on your corpus
+before enabling. Evidence: `docs/HANDOFF.md` §3, `evals/retrieval_backend_bakeoff/EXPERIMENT.md` §4c.

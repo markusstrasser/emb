@@ -1,6 +1,6 @@
 # emb — Maintainer Handoff & Architecture
 
-**Last updated:** 2026-06-11 pm (rerank program DONE: no config beats hybrid → rerank opt-in-after-eval; default reranker → gte @96bc8e8; phenome eval is the open item) · **Audience:** the next agent/maintainer of `emb` and its consumers.
+**Last updated:** 2026-06-11 eve (rerank program DONE — rerank is opt-in-after-eval, default reranker gte @96bc8e8; bakeoff audited to /eval standard, invariant claims in EXPERIMENT.md §6b; external positioning memo added; phenome eval is the open item) · **Audience:** the next agent/maintainer of `emb` and its consumers.
 **Stance:** breaking changes welcome; no backward-compat shims, no legacy wrappers. Keep the
 representation deep and the surface small. This doc is living — update it when the design moves.
 
@@ -122,8 +122,16 @@ Bake-off: `~/Projects/evals/retrieval_backend_bakeoff/` (canonical; not in emb).
 - **v1 A/B** used title-matching queries (query terms = filename) → both 12/12 → *false parity*. A softball.
 - **v2 hard eval** (paraphrased, keyword-stripped, distractor slice): **FS 8/10 · emb-hybrid 5/10 · emb+rerank 1/10**.
 - The 5→1 was the 500-char rerank truncation → §3 fix.
-- Caveat: v2 queries skewed *tangential-needle* (FS's home turf). Topical parity (v1) is real but untested-under-rigor. → §6 item 2.
+- Caveat at the time: v2 queries skewed *tangential-needle* (FS's home turf). **Resolved 2026-06-11**:
+  the topical lane ran (emb-hybrid 9/10 · FS 6/10 · kw-baseline 0/10) — "parity" was wrong in emb's
+  FAVOR; and the rerank conditions were re-measured post-fix (EXPERIMENT.md §4b, §4c).
 - Method lesson now enforced: `evals/CLAUDE.md` requires a discrimination check (trivial-pass baseline + a should-fail case) before any comparison eval.
+- **Audited to /eval standard 2026-06-11** (review mode): SCREENING power declared (N=10/lane,
+  Wilson ±0.227 — verdicts rest on ranks/cell-sweeps/structure, never one margin), prereg
+  provenance mapped to pre-scoring commits, 5 invariant claims extracted with transfer status
+  (EXPERIMENT.md §6b), deviations consolidated (§7). External positioning: we run the private
+  instantiation of what RTEB/FreshStack/EnterpriseRAG-Bench simulate publicly — see
+  `docs/research/2026-06-11-benchmark-positioning.md`.
 
 ---
 
@@ -186,7 +194,9 @@ sessions too, not just torch jobs. Guards now in place:
 ## 8. Map (where everything lives)
 
 - Library: `~/Projects/emb` · elevation plan: `~/Projects/emb/.claude/plans/88ec9920-emb-elevation.md`
-- Research memos: `~/Projects/emb/docs/research/2026-06-10-*.md` (chunking, screenshot-vs-text, txtai, gte-freshness)
+- Research memos: `~/Projects/emb/docs/research/2026-06-10-*.md` (chunking, screenshot-vs-text,
+  txtai, gte-freshness, reranker-frontier-check) · `2026-06-11-benchmark-positioning.md`
+  (where this bakeoff sits vs RTEB / FreshStack / EnterpriseRAG-Bench / TREC ToT)
 - Bake-off + verdicts: `~/Projects/evals/retrieval_backend_bakeoff/` + `~/Projects/evals/DECISIONS.md`
 - Consumers: `~/Projects/phenome` (full), `~/Projects/anki` (embed+pairs), `~/Projects/intel` (`tools/intelligence_mcp.py` + `tools/semantic_index.py`)
 - Hooks: `~/Projects/skills/hooks/pretool-{heavy-load-guard,raw-openai-guard}.sh`
