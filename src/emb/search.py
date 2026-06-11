@@ -10,7 +10,12 @@ from dateutil import parser as date_parser
 from emb.schema import Entry
 
 RRF_K = 60  # Reciprocal Rank Fusion constant
-DEFAULT_RERANKER = 'tomaarsen/Qwen3-Reranker-0.6B-seq-cls'
+# gte replaced Qwen3-Reranker-0.6B on 2026-06-11: it beat Qwen3 in every cell of the
+# 2-lane × 3-pool sweep (evals/retrieval_backend_bakeoff/runs/2026-06-11/), at 1/4 the
+# params, encoder-shaped (ONNX-able), 8192 ctx. NOTE rerank stayed NET-NEGATIVE vs
+# hybrid-alone on that corpus even with gte — rerank=True is opt-in-after-eval, not
+# free insurance (see emb docs/HANDOFF.md §3).
+DEFAULT_RERANKER = 'Alibaba-NLP/gte-reranker-modernbert-base'
 
 # Passage-windowed reranking (BERT-MaxP). The cross-encoder scores the query against
 # OVERLAPPING windows of the FULL chunk and the doc takes its MAX window score — so
@@ -161,6 +166,7 @@ class SearchEngine:
         self._embedding_model = None  # lazy
         self._fts_db = None  # lazy
         self._reranker = None  # lazy
+        self._reranker_model = None  # set by _get_reranker; None when tests inject a mock
 
     def _encode_query(self, query: str) -> np.ndarray:
         """Encode query string to embedding vector via the SAME backend that built
@@ -266,12 +272,14 @@ class SearchEngine:
         if self._reranker is None:
             from emb.embed import require_ram
             # The cross-encoder over a full index is THE workload that OOM-froze the
-            # Mac (2026-06-10). Refuse to load when RAM is critically low.
-            require_ram(2.5, f"cross-encoder reranker {model}")
+            # Mac (2026-06-10). Refuse to load when RAM is critically low. 1.5 GB covers
+            # the 149M default with margin; bigger custom models still get the floor guard.
+            require_ram(1.5, f"cross-encoder reranker {model}")
             from sentence_transformers import CrossEncoder
             # max_length caps each (query, window) pair at the token level; a 1200-char
             # window (~300 tok) fits comfortably so windows are never internally truncated.
             self._reranker = CrossEncoder(model, max_length=512)
+            self._reranker_model = model
         return self._reranker
 
     def _rerank(self, query: str, candidates: List[dict], top_k: int,
@@ -284,8 +292,11 @@ class SearchEngine:
         old `text[:500]` truncation silently demoted any doc whose match lay past char 500.
         """
         reranker = self._get_reranker()
-        instruction = 'Given a web search query, retrieve relevant passages that answer the query.'
-        prefixed = f'Instruct: {instruction}\nQuery: {query}'
+        # Qwen rerankers are instruction-tuned and expect a prefixed query; standard
+        # encoder cross-encoders (gte default) take the raw query.
+        if 'Qwen' in (self._reranker_model or DEFAULT_RERANKER):
+            instruction = 'Given a web search query, retrieve relevant passages that answer the query.'
+            query = f'Instruct: {instruction}\nQuery: {query}'
 
         pairs: List[Tuple[str, str]] = []
         owners: List[int] = []  # pair index → candidate index
@@ -293,7 +304,7 @@ class SearchEngine:
             e = c['entry']
             title = (e.title or '').strip()
             for w in passage_windows(e.text or ''):
-                pairs.append((prefixed, f"{title}\n{w}" if title else w))
+                pairs.append((query, f"{title}\n{w}" if title else w))
                 owners.append(ci)
 
         scores = reranker.predict(pairs) if pairs else []
