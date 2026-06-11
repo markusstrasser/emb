@@ -1,6 +1,6 @@
 # emb — Maintainer Handoff & Architecture
 
-**Last updated:** 2026-06-11 (rerank fix validated; topical lane built, emb half 4/10) · **Audience:** the next agent/maintainer of `emb` and its consumers.
+**Last updated:** 2026-06-11 (bake-off DONE: hold-local-emb unconditional; rerank stage measured net-negative — see §3/§6) · **Audience:** the next agent/maintainer of `emb` and its consumers.
 **Stance:** breaking changes welcome; no backward-compat shims, no legacy wrappers. Keep the
 representation deep and the surface small. This doc is living — update it when the design moves.
 
@@ -57,7 +57,7 @@ pairs (pairs.py)                # `emb pairs`: all-pairs similarity, upper-trian
 
 | Consumer | Uses | Index / model | Notes |
 |---|---|---|---|
-| **phenome** (full API) | search + rerank + read + freshness + spreading | text: gte-768; media: gemini-768 (**separate** spaces, separate indexes) | Heaviest reranker user → **biggest beneficiary of the §3 rerank fix.** Got BM25 pushdown + rerank-pool fix; `fetch_k` hack + LateChunker deleted. |
+| **phenome** (full API) | search + rerank + read + freshness + spreading | text: gte-768; media: gemini-768 (**separate** spaces, separate indexes) | Heaviest reranker user → got the §3 windowing fix, **but ⚠ rerank measured NET-NEGATIVE on intel (9/10→3/10 topical)** — phenome needs an own-domain rerank-on/off eval before trusting `rerank=True`; biomedical chunks may behave differently, don't assume either way. Got BM25 pushdown; `fetch_k` hack + LateChunker deleted. |
 | **anki** (embed + pairs only) | EmbeddingEngine(gemini) + EmbeddingCache + `find_pairs` | gemini-768 multimodal | Type-routed cards (text-only / multipart / occlusion→base-image). dedup ≥0.85, interference 0.74–0.85 (gemini-calibrated). **Uses pairs, not rerank → unaffected by §3.** |
 | **intel** (search via MCP) | SearchEngine hybrid (NO rerank) via 7th MCP tool `semantic_search` | gte-768, 32,084 chunks | Header-aware chunking (code-fence-safe), 52 scaffolding files excluded. **hybrid-only → §3 doesn't touch it in production.** Needle lookups should route to the DuckDB FTS *entity* tools, not semantic_search. |
 
@@ -81,15 +81,20 @@ strictly more of the doc). `CrossEncoder(max_length=512)` so a window is never i
 12-window cap). For a personal lib the quality win dominates; if latency bites, lower
 `RERANK_MAX_WINDOWS` or pre-cap candidate text. Tunable, no code change needed.
 
-**✓ Empirically validated 2026-06-11** (`evals/retrieval_backend_bakeoff`, needle lane re-run):
-recall@5 went **1/10 → 5/10** (= no-rerank). Per-query: 2 buried-needle *rescues* (the windowing
-mechanism working) and 2 *demotions* (no longer truncation — the 0.6B model's own judgment over
-the 100-doc pool; "Drowning in Documents" arXiv:2411.11767 predicts exactly this for small
-rerankers on deep pools). Topical interim points the same way (rerank 1/4 vs hybrid 4/4).
-**Net: harm eliminated, headroom is in pool depth, not windowing.** Measured cost: ~4–6 min/query
-(CPU, 4 threads, pool=100, long docs) — fine for batch, heavy for interactive; see
-`docs/research/2026-06-10-reranker-frontier-check.md` for the evidence-backed latency program
-(pool 25–50 → gte-reranker-modernbert-base swap → window pruning → ONNX INT8).
+**✓ Empirically validated 2026-06-11** (`evals/retrieval_backend_bakeoff`, both lanes):
+needle recall@5 **1/10 → 5/10** — the truncation harm is gone, and the windowing mechanism
+demonstrably rescues buried content (3 rescues across lanes that no-rerank missed).
+
+**⚠ But the rerank STAGE is now measurably net-negative on intel-style corpora** — this is the
+model+pool, not the windowing: topical lane **hybrid 9/10 → rerank 3/10** (7 demotions, 1 rescue).
+Across all 20 queries: 3 rescues, 9 demotions. Recall below retrieval-alone is exactly the
+"Drowning in Documents" (arXiv:2411.11767) regime — a 0.6B cross-encoder re-sorting a 100-doc
+pool of confusable siblings discards the RRF dual-leg rank evidence in favor of one confident
+window score. The fix program, in order (see
+`docs/research/2026-06-10-reranker-frontier-check.md`): pool {25,50,100} sweep →
+gte-reranker-modernbert-base swap → window pruning → if nothing recovers, `rerank=False` becomes
+the honest default. Until then **treat `rerank=True` as unvalidated per-corpus, not free insurance.**
+Measured cost: ~4–6 min/query (CPU, 4 threads, pool=100, long docs) — batch-only territory.
 
 ---
 
@@ -119,24 +124,24 @@ Bake-off: `~/Projects/evals/retrieval_backend_bakeoff/` (canonical; not in emb).
 
 ## 6. Open items (next steps, with exact commands)
 
-1. **Finish the emb topical lane** (4/10 checkpointed; killed after 3 swap-evictions — resumable,
-   skips scored queries). Interim: hybrid 4/4 (incl. 2 docs FS missed), rerank 1/4. FS topical = 6/10.
-   ```bash
-   # ~30 min on a QUIET machine (quiet = no other torch jobs AND minimal agent sessions — §7).
-   cd ~/Projects/intel && OMP_NUM_THREADS=4 TOKENIZERS_PARALLELISM=false \
-     uv run python3 ~/Projects/evals/retrieval_backend_bakeoff/topical_recall.py emb
-   ```
-   Then: write the topical section into `EXPERIMENT.md` (FS 6/10 + kw-baseline 0/10 are final),
-   finalize the `intel-search-backend` DECISIONS row, and re-stamp this doc. If hybrid holds ≥
-   FS's 6/10, the local-emb verdict becomes unconditional (needle edge = FS's only win, already
-   priced into the RQ2 trade).
-2. **Pool-depth sweep {25,50,100}** on both lanes — the evidence-backed next lever (4 of 5 rerank
-   demotions tonight are pool-judgment errors; arXiv:2411.11767 says deep pools + small rerankers
-   degrade recall). Config-only change; expect 25–50 to match or beat 100 at ~4× less compute.
-3. **Reranker latency program** (after the sweep): evaluate `gte-reranker-modernbert-base` (149M
-   encoder, 8192 ctx — kills most windowing, ONNX-able) vs Qwen3-Reranker-0.6B on these same lanes;
-   then window pruning (cross-encode top-3 windows by dense score — quality-positive per EviRerank);
-   then ONNX INT8. Full evidence + sequencing: `docs/research/2026-06-10-reranker-frontier-check.md`.
+*(2026-06-11: the bake-off is DONE — needle 5/5/8, topical 9/3/6 for hybrid/rerank/FS; verdict
+"hold local emb, unconditional" landed in `evals/DECISIONS.md`. What remains is the rerank
+program the results demand.)*
+
+1. **Pool-depth sweep {25,50,100}** on both lanes — the top lever. 9 of 12 rerank errors across
+   20 queries are demotions of docs hybrid had right; arXiv:2411.11767 says deep pools + small
+   rerankers degrade recall, and pool=100 with confusable siblings produced 9/10→3/10. Re-run is
+   cheap: pools are frozen per-query in `topical_run.json`/`recall_run_postfix.jsonl` — rerank
+   their top-{25,50} prefixes with `topical_emb_lowram.py`-style phaseB (CPU-pinned, ≤4GB, no
+   re-retrieval needed). If 25–50 doesn't recover rerank ≥ hybrid, step 2; if nothing does,
+   **flip the default to `rerank=False`** and make callers opt in per-corpus.
+2. **Reranker swap eval**: `gte-reranker-modernbert-base` (149M encoder, 8192 ctx — kills most
+   windowing, ONNX-able) vs Qwen3-Reranker-0.6B on the same frozen pools; then window pruning
+   (top-3 windows by dense score — quality-positive per EviRerank); then ONNX INT8. Evidence +
+   sequencing: `docs/research/2026-06-10-reranker-frontier-check.md`.
+3. **phenome rerank-on/off eval** (own domain, own queries) — phenome reranks by default and the
+   intel result says that's unvalidated insurance. Frozen-pool method from item 1 transfers
+   directly. Until run, phenome should know `rerank=True` is a belief, not a measurement.
 4. **anki interference band** (0.74–0.85) is gemini-calibrated provisionally — validate against real
    confusion pairs over time; re-tune if the model changes.
 5. **(Optional, deeper)** File Search's only durable edge is *chunk granularity*. If needle retrieval
@@ -162,6 +167,12 @@ sessions too, not just torch jobs. Guards now in place:
   warns; drop it so an oversized tensor errors cleanly. (gte/Qwen on CPU is slow but safe.)
 - **`emb.embed.require_ram()`** refuses to load a model when RAM is critically low (gte 1.5 GB,
   reranker 2.5 GB) — a clear error beats a silent SIGKILL.
+- **MPS is the DAYTIME failure mode** (2026-06-11): the Apple-GPU pool is unified memory shared
+  with everything the user runs — a cross-encoder auto-placed on MPS OOM'd at "other allocations:
+  14 GB" while the user worked. It fails CLEAN (RuntimeError) — good — but for background/eval
+  jobs on a busy machine, **pin the model to CPU** (`CrossEncoder(..., device="cpu")`) and split
+  embedder/reranker into separate processes (`topical_emb_lowram.py` pattern, ≤4 GB each).
+  Night failure = swap eviction; day failure = MPS pool. Same root: 18 GB unified.
 - **Route LLM *generation* through llmx**, not raw SDKs: `llmx ... --lite bare` = $0 GPT (ChatGPT
   sub); `--flex` = 50%-off gemini; or `~/Projects/skills/scripts/llm-dispatch.py`. `pretool-raw-openai-guard.sh`
   (wired) blocks raw `import openai` in `.py`. **SDK exceptions:** embeddings (`embed_content`) and
