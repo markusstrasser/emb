@@ -1,6 +1,6 @@
 # emb — Maintainer Handoff & Architecture
 
-**Last updated:** 2026-06-11 (bake-off DONE: hold-local-emb unconditional; rerank stage measured net-negative — see §3/§6) · **Audience:** the next agent/maintainer of `emb` and its consumers.
+**Last updated:** 2026-06-11 pm (rerank program DONE: no config beats hybrid → rerank opt-in-after-eval; default reranker → gte @96bc8e8; phenome eval is the open item) · **Audience:** the next agent/maintainer of `emb` and its consumers.
 **Stance:** breaking changes welcome; no backward-compat shims, no legacy wrappers. Keep the
 representation deep and the surface small. This doc is living — update it when the design moves.
 
@@ -90,11 +90,15 @@ model+pool, not the windowing: topical lane **hybrid 9/10 → rerank 3/10** (7 d
 Across all 20 queries: 3 rescues, 9 demotions. Recall below retrieval-alone is exactly the
 "Drowning in Documents" (arXiv:2411.11767) regime — a 0.6B cross-encoder re-sorting a 100-doc
 pool of confusable siblings discards the RRF dual-leg rank evidence in favor of one confident
-window score. The fix program, in order (see
-`docs/research/2026-06-10-reranker-frontier-check.md`): pool {25,50,100} sweep →
-gte-reranker-modernbert-base swap → window pruning → if nothing recovers, `rerank=False` becomes
-the honest default. Until then **treat `rerank=True` as unvalidated per-corpus, not free insurance.**
-Measured cost: ~4–6 min/query (CPU, 4 threads, pool=100, long docs) — batch-only territory.
+window score. **The fix program RAN 2026-06-11** (sweep: both lanes × {qwen3, gte-windowed,
+gte-native-8192} × pools {25,50,100} over frozen drift-guarded pools; hermetic candidate
+snapshot in `evals/.../runs/2026-06-11/pool_snapshot.json.gz`): **no config beat hybrid on both
+lanes** → `rerank=True` is **opt-in-after-eval**, never free insurance. But gte beat qwen3 in
+every cell → `DEFAULT_RERANKER` is now `gte-reranker-modernbert-base` (96bc8e8; ¼ params,
+ONNX-able, Qwen prefix conditional). Windowed MaxP retained — gte-native loses the deep-needle
+rescues (6 vs 7 @100; long-doc dilution, frontier-memo Q1 confirmed). Known-good opt-in for
+needle-heavy use: gte windowed @100 → needle 7/10, best local measured (FS: 8/10); gte@25 is
+net-even with hybrid at near-free latency. Full grid: `evals/retrieval_backend_bakeoff/EXPERIMENT.md` §4c.
 
 ---
 
@@ -102,6 +106,7 @@ Measured cost: ~4–6 min/query (CPU, 4 threads, pool=100, long docs) — batch-
 
 | Decision | Verdict | Recorded in |
 |---|---|---|
+| Reranker model + default | **`gte-reranker-modernbert-base`, opt-in only** — beat Qwen3-0.6B in every sweep cell; NO rerank config beat hybrid-alone on intel (bar: both lanes) → `rerank=True` is opt-in-after-eval. Windowed MaxP kept (native-8192 loses deep needles). | evals `DECISIONS.md` → `emb-rerank-default`; `retrieval_backend_bakeoff/EXPERIMENT.md` §4c |
 | Text embedding model | **Keep `gte-modernbert-base`** — competitive-with-best on English retrieval (BEIR 55.3 edges granite-en-r2 53.1); re-embed not worth it. Qwen3-Embedding-0.6B is the only real upgrade but breaks ≤500M + forces 768→1024d. | `docs/research/2026-06-10-gte-freshness-check.md` |
 | Multimodal model | **`gemini-embedding-2-preview`** — won the abstract-media two-judge eval over Jina v5 Omni. | `phenome/docs/research/embedding-stack-upgrade-2026-05-29.md` |
 | Adopt txtai? | **No.** Glue-inversion (we already harness the engines); bus-factor-1; its SQL+vector is post-filter (ships phenome's worst historical bug as design); litellm route (evicted). Cherry-picked convex fusion only. | `docs/research/2026-06-10-txtai-deepdive.md`; agent-infra `decisions/2026-06-10-dependency-glue-inversion.md` |
@@ -128,25 +133,21 @@ Bake-off: `~/Projects/evals/retrieval_backend_bakeoff/` (canonical; not in emb).
 "hold local emb, unconditional" landed in `evals/DECISIONS.md`. What remains is the rerank
 program the results demand.)*
 
-1. **Pool-depth sweep {25,50,100}** on both lanes — IN PROGRESS 2026-06-11 via
-   `evals/retrieval_backend_bakeoff/sweep_rerank.py` (stages: pools → score-qwen3 → score-gte →
-   report; each a ≤4GB CPU-pinned process). Pools + per-gold pre-rerank ranks now genuinely
-   frozen in `runs/2026-06-11/sweep_rerank.json` (an earlier note claimed the run artifacts
-   carried pools — they didn't; re-derived deterministically under a drift guard). Early
-   structural finding: the 2 needle rescues came from pool ranks 56/60 (deep-pool-only), while
-   9/10 topical golds sat at rank 0–2 pre-rerank — pool depth is a direct needle↔topical trade.
-   Decision rule unchanged: no config with rerank ≥ hybrid on both lanes → **flip the default to
-   `rerank=False`**, callers opt in per-corpus.
-2. **Reranker swap eval**: `gte-reranker-modernbert-base` (149M encoder, 8192 ctx — kills most
-   windowing, ONNX-able) vs Qwen3-Reranker-0.6B on the same frozen pools; then window pruning
-   (top-3 windows by dense score — quality-positive per EviRerank); then ONNX INT8. Evidence +
-   sequencing: `docs/research/2026-06-10-reranker-frontier-check.md`.
-3. **phenome rerank-on/off eval** (own domain, own queries) — phenome reranks by default and the
-   intel result says that's unvalidated insurance. Frozen-pool method from item 1 transfers
-   directly. Until run, phenome should know `rerank=True` is a belief, not a measurement.
-4. **anki interference band** (0.74–0.85) is gemini-calibrated provisionally — validate against real
+*(2026-06-11 later: items 1–2 — the pool sweep and the swap eval — RAN; outcome in §3 and
+`evals/.../EXPERIMENT.md` §4c. Default reranker swapped to gte (96bc8e8); rerank stays opt-in.)*
+
+1. **phenome rerank-on/off eval** (own domain, own queries) — phenome reranks by default and the
+   intel sweep says that's unvalidated insurance (no config beat hybrid there). The method
+   transfers directly: freeze phenome pools via a `sweep_rerank.py`-style pools stage, snapshot
+   candidate texts, score gte-windowed @{25,100} vs hybrid. Until run, phenome's `rerank=True`
+   is a belief, not a measurement.
+2. **Opt-in latency extras, only if a consumer actually opts into rerank**: window pruning
+   (top-3 windows by dense score — quality-positive per EviRerank) and ONNX INT8 on the gte
+   encoder (~2× CPU). Don't build ahead of a consumer. Evidence:
+   `docs/research/2026-06-10-reranker-frontier-check.md`.
+3. **anki interference band** (0.74–0.85) is gemini-calibrated provisionally — validate against real
    confusion pairs over time; re-tune if the model changes.
-5. **(Optional, deeper)** File Search's only durable edge is *chunk granularity*. If needle retrieval
+4. **(Optional, deeper)** File Search's only durable edge is *chunk granularity*. If needle retrieval
    becomes important for a consumer, the right emb answer is finer/multi-granularity chunking
    (chunk + section + doc), not adopting FS. Don't build until a consumer needs it.
 
