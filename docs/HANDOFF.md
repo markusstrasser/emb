@@ -128,13 +128,15 @@ Bake-off: `~/Projects/evals/retrieval_backend_bakeoff/` (canonical; not in emb).
 "hold local emb, unconditional" landed in `evals/DECISIONS.md`. What remains is the rerank
 program the results demand.)*
 
-1. **Pool-depth sweep {25,50,100}** on both lanes — the top lever. 9 of 12 rerank errors across
-   20 queries are demotions of docs hybrid had right; arXiv:2411.11767 says deep pools + small
-   rerankers degrade recall, and pool=100 with confusable siblings produced 9/10→3/10. Re-run is
-   cheap: pools are frozen per-query in `topical_run.json`/`recall_run_postfix.jsonl` — rerank
-   their top-{25,50} prefixes with `topical_emb_lowram.py`-style phaseB (CPU-pinned, ≤4GB, no
-   re-retrieval needed). If 25–50 doesn't recover rerank ≥ hybrid, step 2; if nothing does,
-   **flip the default to `rerank=False`** and make callers opt in per-corpus.
+1. **Pool-depth sweep {25,50,100}** on both lanes — IN PROGRESS 2026-06-11 via
+   `evals/retrieval_backend_bakeoff/sweep_rerank.py` (stages: pools → score-qwen3 → score-gte →
+   report; each a ≤4GB CPU-pinned process). Pools + per-gold pre-rerank ranks now genuinely
+   frozen in `runs/2026-06-11/sweep_rerank.json` (an earlier note claimed the run artifacts
+   carried pools — they didn't; re-derived deterministically under a drift guard). Early
+   structural finding: the 2 needle rescues came from pool ranks 56/60 (deep-pool-only), while
+   9/10 topical golds sat at rank 0–2 pre-rerank — pool depth is a direct needle↔topical trade.
+   Decision rule unchanged: no config with rerank ≥ hybrid on both lanes → **flip the default to
+   `rerank=False`**, callers opt in per-corpus.
 2. **Reranker swap eval**: `gte-reranker-modernbert-base` (149M encoder, 8192 ctx — kills most
    windowing, ONNX-able) vs Qwen3-Reranker-0.6B on the same frozen pools; then window pruning
    (top-3 windows by dense score — quality-positive per EviRerank); then ONNX INT8. Evidence +
