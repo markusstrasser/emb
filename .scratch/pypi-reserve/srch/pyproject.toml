@@ -1,0 +1,10 @@
+[project]
+name = "srch"
+version = "0.0.1"
+description = "Name reserved for an upcoming hybrid semantic-search CLI (embed, index, search multimodal corpora). Placeholder release."
+license = "MIT"
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
