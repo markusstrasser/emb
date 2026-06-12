@@ -1,7 +1,7 @@
 [project]
 name = "emb"
 dynamic = ["version"]
-description = "Embed, index, and search text corpora with sentence-transformers"
+description = "Embed, index, and search text and multimodal corpora — hybrid BM25+dense retrieval, reranking, all-pairs similarity, locate-then-read"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = [

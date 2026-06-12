@@ -158,6 +158,16 @@ program the results demand.)*
 4. **(Optional, deeper)** File Search's only durable edge is *chunk granularity*. If needle retrieval
    becomes important for a consumer, the right emb answer is finer/multi-granularity chunking
    (chunk + section + doc), not adopting FS. Don't build until a consumer needs it.
+5. **Rename — only when publishing to PyPI.** `emb` is already taken on PyPI by an unrelated
+   package, so `uvx emb` / `pip install emb` can never resolve to this tool; the current
+   git-install path (`uv tool install git+…`) doesn't care. Shortlist verified FREE on PyPI
+   2026-06-12: **`srch`**, **`semsearch`**, **`semsrch`** (also free that day: `skry`, `huntr`,
+   `corpusgrep`, `greplike`; taken: `sift`, `recall`, `scry`, `glean`, `winnow`, `trawl`).
+   Re-verify before acting: `curl -s -o /dev/null -w "%{http_code}" https://pypi.org/pypi/NAME/json`
+   (404 = free). Cheap insurance: register the chosen name as an empty package now. The rename
+   itself touches three consumer repos (phenome justfile + `src/phenome/search.py`, anki's
+   embed scripts, intel `tools/intelligence_mcp.py`), the `.emb_cache_*` dir convention, and
+   docs — one breaking session, no shims.
 
 ---
 
