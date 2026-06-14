@@ -1,7 +1,15 @@
+import importlib.util
+
 import numpy as np
 import pytest
 
-from emb.pairs import find_pairs, iter_pairs
+from emb.pairs import find_pairs, iter_pairs, find_fuzzy_pairs
+
+# fuzzy is an optional backend (emb[fuzzy]); skip only the fuzzy tests if absent.
+needs_rapidfuzz = pytest.mark.skipif(
+    importlib.util.find_spec("rapidfuzz") is None,
+    reason="rapidfuzz not installed (optional dep: emb[fuzzy])",
+)
 
 
 def _normed(arr):
@@ -83,3 +91,61 @@ def test_iter_matches_find():
     streamed = set((i, j) for i, j, _ in iter_pairs(emb, threshold=0.3))
     materialized = set((i, j) for i, j, _ in find_pairs(emb, threshold=0.3))
     assert streamed == materialized
+
+
+# --- fuzzy (rapidfuzz token_set_ratio) pairs -------------------------------------
+
+@needs_rapidfuzz
+def test_fuzzy_finds_near_dup_not_unrelated():
+    # 0 and 1 differ only by whitespace + punctuation (near-dup); 2 is unrelated.
+    texts = ["hello world", "hello  world!", "goodbye moon"]
+    pairs = find_fuzzy_pairs(texts, threshold=90.0)
+    found = {(i, j) for i, j, _ in pairs}
+    assert (0, 1) in found
+    assert (0, 2) not in found and (1, 2) not in found
+    assert all(j > i for i, j, _ in pairs)  # upper triangle only
+    assert all(s >= 90.0 for *_, s in pairs)  # 0-100 scale
+
+
+@needs_rapidfuzz
+def test_fuzzy_token_reorder_is_a_match():
+    # token_set_ratio is order-insensitive — reordered tokens should still pair.
+    texts = ["quick brown fox", "fox quick brown", "lazy dog sleeps"]
+    found = {(i, j) for i, j, _ in find_fuzzy_pairs(texts, threshold=90.0)}
+    assert (0, 1) in found
+    assert (0, 2) not in found
+
+
+@needs_rapidfuzz
+def test_fuzzy_empty_and_singleton():
+    assert find_fuzzy_pairs([]) == []
+    assert find_fuzzy_pairs(["only one"]) == []
+
+
+@needs_rapidfuzz
+def test_fuzzy_sorted_descending():
+    texts = ["alpha beta", "alpha beta gamma", "alpha bета", "totally different string"]
+    pairs = find_fuzzy_pairs(texts, threshold=0.0)
+    sims = [s for _, _, s in pairs]
+    assert sims == sorted(sims, reverse=True)
+
+
+@needs_rapidfuzz
+def test_fuzzy_max_threshold_band():
+    texts = ["acme corp", "acme corporation", "acme corp", "wholly unrelated text here"]
+    band = find_fuzzy_pairs(texts, threshold=50.0, max_threshold=99.0)
+    # The two identical "acme corp" (score 100) are excluded by the upper band.
+    assert all(50.0 <= s <= 99.0 for _, _, s in band)
+
+
+@needs_rapidfuzz
+def test_fuzzy_nonpositive_top_k_returns_empty():
+    assert find_fuzzy_pairs(["a a", "a a a", "b b"], threshold=0.0, top_k=0) == []
+
+
+@needs_rapidfuzz
+def test_fuzzy_topk_subset_of_full():
+    texts = ["red apple", "red apple pie", "green apple", "blue sky", "blue sky high"]
+    full = {(i, j) for i, j, _ in find_fuzzy_pairs(texts, threshold=0.0)}
+    capped = {(i, j) for i, j, _ in find_fuzzy_pairs(texts, threshold=0.0, top_k=1)}
+    assert capped <= full

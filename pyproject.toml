@@ -21,6 +21,9 @@ image = [
 rerank = [
     "sentence-transformers>=2.2.0",
 ]
+fuzzy = [
+    "rapidfuzz>=3.0",
+]
 gemini = [
     "google-genai>=1.0.0",
     "pillow>=10.0.0",

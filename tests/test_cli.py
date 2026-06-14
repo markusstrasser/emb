@@ -2,7 +2,10 @@
 
 embed and search require model loading, so they are integration-level only.
 """
+import importlib.util
 import json
+
+import pytest
 from typer.testing import CliRunner
 from emb.cli import app
 
@@ -232,3 +235,32 @@ def test_search_no_query_no_interactive_fails(tmp_path):
     }))
     result = runner.invoke(app, ["search", str(idx)])
     assert result.exit_code == 1
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("rapidfuzz") is None,
+    reason="rapidfuzz not installed (optional dep: emb[fuzzy])",
+)
+def test_pairs_fuzzy_writes_marked_jsonl(tmp_path):
+    """`pairs --fuzzy` finds string near-dups (no embeddings needed) and marks the
+    score_type in the JSONL. Entries here have NO embedding field — proving fuzzy mode
+    never touches the embedding path."""
+    idx = tmp_path / "corpus.json"
+    out = tmp_path / "pairs.jsonl"
+    idx.write_text(json.dumps({
+        'metadata': {'embedding_model': 'test'},
+        'entries': [
+            {'id': 'a', 'text': 'hello world'},
+            {'id': 'b', 'text': 'hello  world!'},
+            {'id': 'c', 'text': 'goodbye moon'},
+        ],
+    }))
+    result = runner.invoke(app, ["pairs", str(idx), "--fuzzy", "-t", "90", "-o", str(out)])
+    assert result.exit_code == 0, result.output
+
+    recs = [json.loads(line) for line in out.read_text().splitlines()]
+    assert len(recs) == 1
+    rec = recs[0]
+    assert {rec['id_1'], rec['id_2']} == {'a', 'b'}
+    assert rec['score_type'] == 'fuzzy_token_set_ratio_0_100'
+    assert rec['similarity'] >= 90.0  # 0-100 scale, not 0-1

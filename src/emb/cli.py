@@ -355,39 +355,80 @@ def read(
 @app.command()
 def pairs(
     index_file: Path = typer.Argument(..., help="Index directory (split) or JSON file"),
-    threshold: float = typer.Option(0.85, "--threshold", "-t", help="Min similarity"),
-    max_threshold: Optional[float] = typer.Option(None, "--max-threshold", help="Max similarity (for bands, e.g. interference 0.50-0.80)"),
+    threshold: Optional[float] = typer.Option(None, "--threshold", "-t", help="Min similarity. Default 0.85 (cosine, 0-1); with --fuzzy, default 90 (token_set_ratio, 0-100)"),
+    max_threshold: Optional[float] = typer.Option(None, "--max-threshold", help="Max similarity (for bands, e.g. cosine interference 0.50-0.80, or a fuzzy band 70-95)"),
     top_k: Optional[int] = typer.Option(None, "--top-k", "-k", help="Keep only each item's top-K partners (caps output)"),
+    fuzzy: bool = typer.Option(False, "--fuzzy", help="Near-duplicate pairs by CHARACTER/TOKEN edit-distance (rapidfuzz token_set_ratio, 0-100) instead of dense embeddings. Catches typos/punctuation/OCR/reorder variants embeddings rate as merely 'similar'. Loads NO embedding model — fast, GPU-free. Needs: uv pip install 'emb\\[fuzzy]'"),
     output: Optional[Path] = typer.Option(None, "--output", "-o", help="Write pairs as JSONL (default: print summary)"),
 ):
-    """Find all high-similarity PAIRS within a corpus (duplicates, interference)."""
+    """Find all high-similarity PAIRS within a corpus (duplicates, interference).
+
+    Two axes:
+      (default) dense embedding cosine similarity (0-1) — semantic near-duplicates.
+      --fuzzy   rapidfuzz token_set_ratio (0-100) — string near-duplicates (typo/OCR/
+                punctuation/reorder). No model load. Output JSONL marks score_type.
+    """
     import numpy as np
-    from emb.pairs import find_pairs, write_pairs_jsonl
+    from emb.pairs import find_pairs, find_fuzzy_pairs, write_pairs_jsonl
 
     index_file = Path(index_file)
-    if index_file.is_dir():
-        from emb.index import read_index
-        entries, embeddings, _ = read_index(index_file)
-    else:
-        with open(index_file) as f:
-            from emb.schema import Entry
-            data = json.load(f)
-        entries = [Entry.from_dict(e) for e in data['entries']]
-        embeddings = np.array([e.embedding for e in entries], dtype=np.float32)
 
-    console.print(f"  {len(entries)} entries, computing pairs (threshold={threshold})...")
-    found = find_pairs(embeddings, threshold=threshold, max_threshold=max_threshold, top_k=top_k)
+    if fuzzy:
+        # Fuzzy needs only entry texts — never load embeddings or a model.
+        entries = _load_entries_only(index_file)
+        thr = 90.0 if threshold is None else threshold
+        console.print(f"  {len(entries)} entries, computing fuzzy pairs (token_set_ratio, threshold={thr}/100)...")
+        found = find_fuzzy_pairs([e.text for e in entries], threshold=thr, max_threshold=max_threshold, top_k=top_k)
+        score_type = 'fuzzy_token_set_ratio_0_100'
+        score_fmt = lambda s: f"{s:6.1f}"
+    else:
+        if index_file.is_dir():
+            from emb.index import read_index
+            entries, embeddings, _ = read_index(index_file)
+        else:
+            with open(index_file) as f:
+                from emb.schema import Entry
+                data = json.load(f)
+            entries = [Entry.from_dict(e) for e in data['entries']]
+            embeddings = np.array([e.embedding for e in entries], dtype=np.float32)
+        thr = 0.85 if threshold is None else threshold
+        console.print(f"  {len(entries)} entries, computing pairs (threshold={thr})...")
+        found = find_pairs(embeddings, threshold=thr, max_threshold=max_threshold, top_k=top_k)
+        score_type = 'cosine_0_1'
+        score_fmt = lambda s: f"{s:.4f}"
+
     console.print(f"  Found {len(found)} pairs")
 
     if output:
         ids = [e.id for e in entries]
-        write_pairs_jsonl(found, output, ids=ids)
+        write_pairs_jsonl(found, output, ids=ids, score_type=score_type)
         console.print(f"  Written to {output}")
     else:
         for i, j, sim in found[:50]:
-            console.print(f"  {sim:.4f}  [{entries[i].id}]  ~  [{entries[j].id}]")
+            # markup=False: entry ids can contain '[...]' which Rich would parse as
+            # style tags and blank out.
+            console.print(f"  {score_fmt(sim)}  [{entries[i].id}]  ~  [{entries[j].id}]", markup=False)
         if len(found) > 50:
             console.print(f"  ... and {len(found) - 50} more (use --output to write all)")
+
+
+def _load_entries_only(index_file: Path):
+    """Load entries (text + ids) WITHOUT embeddings — for fuzzy pairs (no model needed).
+
+    Split index: read entries.jsonl directly (skip the embeddings.npy mmap). Legacy JSON:
+    parse entries (embedding field ignored)."""
+    index_file = Path(index_file)
+    if index_file.is_dir():
+        from emb.io import read_jsonl
+        entries_path = index_file / "entries.jsonl"
+        if not entries_path.exists():
+            console.print(f"[red]No entries.jsonl in {index_file}/[/red]")
+            raise typer.Exit(1)
+        return read_jsonl(str(entries_path))
+    with open(index_file) as f:
+        from emb.schema import Entry
+        data = json.load(f)
+    return [Entry.from_dict(e) for e in data['entries']]
 
 
 @app.command()
