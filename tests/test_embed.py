@@ -1,5 +1,7 @@
 import numpy as np
 import pytest
+import sys
+import types
 from unittest.mock import patch, MagicMock
 from emb.embed import EmbeddingEngine, compute_content_hash, KNOWN_MODELS, model_slug, _l2_normalize
 from emb.schema import Entry
@@ -68,6 +70,30 @@ def test_engine_unknown_model():
     engine = EmbeddingEngine(model='custom/model', dim=512, backend='sentence-transformers')
     assert engine.dim == 512
     assert engine.backend == 'sentence-transformers'
+
+def test_cached_sentence_transformer_loads_local_only(monkeypatch):
+    calls = []
+
+    class FakeSentenceTransformer:
+        def __init__(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            self.max_seq_length = None
+
+    monkeypatch.setitem(
+        sys.modules,
+        'sentence_transformers',
+        types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+    )
+    monkeypatch.setattr('emb.embed.require_ram', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr('emb.embed._model_is_cached', lambda _model: True)
+
+    engine = EmbeddingEngine()
+    assert engine._get_st_model().max_seq_length == 512
+
+    assert calls
+    assert calls[0][0] == ('Alibaba-NLP/gte-modernbert-base',)
+    assert calls[0][1]['trust_remote_code'] is True
+    assert calls[0][1]['local_files_only'] is True
 
 def test_embed_texts_with_mock():
     engine = EmbeddingEngine(dim=4)

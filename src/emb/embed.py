@@ -138,14 +138,19 @@ class EmbeddingEngine:
         """Lazy-load sentence-transformers model, confirming download if needed."""
         if self._st_model is None:
             require_ram(1.5, f"embedding model {self.model}")
-            if not _model_is_cached(self.model):
+            cached = _model_is_cached(self.model)
+            if not cached:
                 if not _confirm_model_download(self.model):
                     raise SystemExit("Model download declined.")
             import os
             os.environ['TOKENIZERS_PARALLELISM'] = 'true'
             os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.0'
             from sentence_transformers import SentenceTransformer
-            self._st_model = SentenceTransformer(self.model, trust_remote_code=True)
+            self._st_model = SentenceTransformer(
+                self.model,
+                trust_remote_code=True,
+                local_files_only=cached,
+            )
             self._st_model.max_seq_length = 512
         return self._st_model
 
