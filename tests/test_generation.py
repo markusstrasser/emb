@@ -22,6 +22,7 @@ from emb.generation import (
     RecipeMismatchError,
     UnsafeGenerationIdError,
     activate_generation,
+    read_active_manifest,
     read_generation,
     validate_generation,
     write_generation,
@@ -113,6 +114,17 @@ def test_write_read_and_manifest_is_sole_authority(tmp_path):
         "generation_id",
         "generation_manifest_sha256",
     }
+
+
+def test_active_manifest_status_read_does_not_load_payloads(tmp_path):
+    generation = _write(tmp_path)
+    (generation.path / "embeddings.npy").unlink()
+
+    manifest = read_active_manifest(tmp_path)
+
+    assert manifest["generation_id"] == "g1"
+    with pytest.raises(PayloadDigestMismatchError):
+        read_generation(tmp_path)
 
 
 def test_interrupted_build_never_changes_active_pointer(tmp_path, monkeypatch):

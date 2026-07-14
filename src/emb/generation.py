@@ -510,6 +510,36 @@ def _pointer(lane_root: Path) -> tuple[str, str]:
     return generation_id, expected_digest
 
 
+def _resolve_active_generation(
+    lane_root: Path,
+) -> tuple[Path, str, dict[str, Any]]:
+    generation_id, expected_digest = _pointer(lane_root)
+    generation_path = lane_root / "generations" / generation_id
+    if generation_path.is_symlink() or not generation_path.is_dir():
+        raise GenerationNotFoundError(
+            f"active generation {generation_id!r} does not exist under {lane_root}"
+        )
+    manifest, _ = _load_manifest(generation_path, expected_digest)
+    if manifest.get("generation_id") != generation_id:
+        raise ManifestValidationError(
+            f"manifest generation_id {manifest.get('generation_id')!r} does not match "
+            f"active pointer {generation_id!r}"
+        )
+    return generation_path, expected_digest, manifest
+
+
+def read_active_manifest(lane_root: Path) -> dict[str, Any]:
+    """Validate the active pointer and manifest identity without loading payloads.
+
+    This is the lightweight surface for status and restart-barrier checks. Use
+    :func:`read_generation` before serving entries or vectors; it additionally
+    validates every payload digest, entry, recipe, shape, dtype, and finite value.
+    """
+
+    _, _, manifest = _resolve_active_generation(Path(lane_root))
+    return manifest
+
+
 def read_generation(
     lane_root: Path,
     *,
@@ -519,12 +549,7 @@ def read_generation(
     """Resolve the activation pointer once and read one validated generation."""
 
     lane_root = Path(lane_root)
-    generation_id, expected_digest = _pointer(lane_root)
-    generation_path = lane_root / "generations" / generation_id
-    if generation_path.is_symlink() or not generation_path.is_dir():
-        raise GenerationNotFoundError(
-            f"active generation {generation_id!r} does not exist under {lane_root}"
-        )
+    generation_path, expected_digest, _ = _resolve_active_generation(lane_root)
     generation = validate_generation(
         generation_path,
         expected_manifest_sha256=expected_digest,
