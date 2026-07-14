@@ -157,8 +157,8 @@ def test_merge_records_source_files(tmp_path):
     assert len(merged['metadata']['merged_from']) == 2
 
 
-def test_merge_model_mismatch_warning(tmp_path):
-    """Merge should warn when models differ but still proceed."""
+def test_merge_model_mismatch_fails(tmp_path):
+    """Merge must reject vectors from different model spaces."""
     idx1 = tmp_path / "a.json"
     idx2 = tmp_path / "b.json"
     out = tmp_path / "merged.json"
@@ -173,13 +173,28 @@ def test_merge_model_mismatch_warning(tmp_path):
     }))
 
     result = runner.invoke(app, ["merge", str(idx1), str(idx2), "-o", str(out)])
-    assert result.exit_code == 0
-    assert "mismatch" in result.output.lower() or "Warning" in result.output
+    assert result.exit_code == 1
+    assert "Incompatible" in result.output
+    assert not out.exists()
 
-    # Should still produce output
-    with open(out) as f:
-        merged = json.load(f)
-    assert len(merged['entries']) == 2
+
+def test_merge_recipe_mismatch_fails(tmp_path):
+    idx1 = tmp_path / "a.json"
+    idx2 = tmp_path / "b.json"
+    out = tmp_path / "merged.json"
+    idx1.write_text(json.dumps({
+        'metadata': {'embedding_model': 'test', 'embedding_dim': 4, 'recipe_id': 'r1'},
+        'entries': [{'id': 'e1', 'text': 't1', 'embedding': [0] * 4}],
+    }))
+    idx2.write_text(json.dumps({
+        'metadata': {'embedding_model': 'test', 'embedding_dim': 4, 'recipe_id': 'r2'},
+        'entries': [{'id': 'e2', 'text': 't2', 'embedding': [0] * 4}],
+    }))
+
+    result = runner.invoke(app, ["merge", str(idx1), str(idx2), "-o", str(out)])
+    assert result.exit_code == 1
+    assert "Incompatible" in result.output
+    assert not out.exists()
 
 
 def test_merge_source_counts(tmp_path):

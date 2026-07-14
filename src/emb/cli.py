@@ -26,18 +26,22 @@ def version():
 @app.command()
 def embed(
     input_file: str = typer.Argument(..., help="JSONL input file (or '-' for stdin)"),
-    output: Path = typer.Option(..., "--output", "-o", help="Output path (directory for split, file for json)"),
+    output: Path = typer.Option(..., "--output", "-o", help="Lane root for immutable generations"),
     model: str = typer.Option("Alibaba-NLP/gte-modernbert-base", "--model", "-m", help="Embedding model"),
     chunk: bool = typer.Option(False, "--chunk", help="Enable sentence-aware chunking"),
     chunk_tokens: int = typer.Option(500, "--chunk-tokens", help="Words per chunk"),
     overlap_tokens: int = typer.Option(50, "--overlap-tokens", help="Overlap words between chunks"),
     force: bool = typer.Option(False, "--force", help="Force re-embed all (ignore cache)"),
     scales: str = typer.Option(None, "--scales", help="Multi-scale chunk sizes, comma-separated (e.g. '200,500')"),
+    lane: str = typer.Option("text", "--lane", help="Logical lane recorded in generation.json"),
+    generation_id: Optional[str] = typer.Option(None, "--generation-id", help="Immutable generation ID (default: UTC timestamp)"),
+    app_git_commit: Optional[str] = typer.Option(None, "--app-git-commit", help="Exact caller Git commit (auto-detected from CWD)"),
+    emb_git_commit: Optional[str] = typer.Option(None, "--emb-git-commit", help="Exact emb Git commit (auto-detected from source checkout)"),
 ):
-    """Embed entries from JSONL into a searchable split index.
+    """Embed entries into an immutable, atomically activated generation.
 
-    Always writes the split format (entries.jsonl + mmap embeddings.npy + metadata.json).
-    To read or migrate a legacy monolithic-JSON index, use `emb convert`.
+    OUTPUT is a lane root containing generations/ and current.json. To read or
+    migrate a legacy monolithic-JSON index, use `emb convert`.
     """
     import numpy as np
     from emb.io import read_jsonl
@@ -82,21 +86,56 @@ def embed(
     # Embed
     entries = engine.embed_entries(entries, cache=cache, checkpoint_dir=cache_dir)
 
-    meta = {
-        'embedding_model': engine.model,
-        'embedding_dim': engine.dim,
-    }
-
-    from emb.index import write_index
+    from datetime import datetime, timezone
+    import subprocess
+    from emb.generation import default_text_recipe, write_generation
     embeddings = np.array([e.embedding for e in entries], dtype=np.float32)
-    write_index(entries, embeddings, output, meta)
-    total_bytes = sum(f.stat().st_size for f in output.iterdir())
-    console.print(f"  Split index written: {output}/ ({total_bytes / 1024 / 1024:.1f} MB, {len(entries)} entries)")
+    generation_id = generation_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+
+    def git_head(path: Path) -> Optional[str]:
+        try:
+            return subprocess.check_output(
+                ["git", "-C", str(path), "rev-parse", "HEAD"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            return None
+
+    app_git_commit = app_git_commit or git_head(Path.cwd())
+    emb_git_commit = emb_git_commit or git_head(Path(__file__).resolve().parents[2])
+    if not app_git_commit or not emb_git_commit:
+        console.print(
+            "[red]Exact app and emb Git commits are required in generation.json. "
+            "Run from Git checkouts or pass --app-git-commit and --emb-git-commit.[/red]"
+        )
+        raise typer.Exit(1)
+    generation = write_generation(
+        output,
+        entries,
+        embeddings,
+        generation_id=generation_id,
+        lane=lane,
+        embedding_model=engine.model,
+        recipes=[default_text_recipe(engine.model, engine.dim)],
+        generator={
+            "app_git_commit": app_git_commit,
+            "emb_git_commit": emb_git_commit,
+            "generator_version": "emb-cli-v1",
+        },
+    )
+    total_bytes = sum(
+        path.stat().st_size for path in generation.path.iterdir() if path.is_file()
+    )
+    console.print(
+        f"  Generation {generation.generation_id} activated under {output}/ "
+        f"({total_bytes / 1024 / 1024:.1f} MB, {len(entries)} entries)"
+    )
 
 
 @app.command()
 def search(
-    index_file: Path = typer.Argument(..., help="Index file (JSON) or directory (split format)"),
+    index_file: Path = typer.Argument(..., help="Generation lane root or legacy index"),
     query: Optional[str] = typer.Argument(None, help="Search query"),
     top_k: int = typer.Option(10, "--top-k", "-k", help="Number of results"),
     sources: Optional[str] = typer.Option(None, "--sources", "-s", help="Comma-separated source filter"),
@@ -151,14 +190,18 @@ def _cag_search(index_file: Path, query, sources, json_output, cag_model):
         console.print("[red]CAG mode requires a query[/red]")
         raise typer.Exit(1)
 
-    # Load entries — from split index (entries.jsonl) or raw JSONL
+    # Load entries from an activated generation, split index, or raw JSONL.
     index_file = Path(index_file)
     if index_file.is_dir():
-        entries_path = index_file / "entries.jsonl"
-        if not entries_path.exists():
-            console.print(f"[red]No entries.jsonl in {index_file}/[/red]")
-            raise typer.Exit(1)
-        entries = read_jsonl(str(entries_path))
+        if (index_file / "current.json").exists():
+            from emb.generation import read_generation
+            entries, _, _ = read_generation(index_file)
+        else:
+            entries_path = index_file / "entries.jsonl"
+            if not entries_path.exists():
+                console.print(f"[red]No entries.jsonl in {index_file}/[/red]")
+                raise typer.Exit(1)
+            entries = read_jsonl(str(entries_path))
     elif str(index_file).endswith('.jsonl'):
         entries = read_jsonl(str(index_file))
     else:
@@ -280,7 +323,7 @@ def _display_results(results, detailed=False):
 
 @app.command()
 def read(
-    index_file: Path = typer.Argument(..., help="Index directory (split) or JSON file"),
+    index_file: Path = typer.Argument(..., help="Generation lane root or legacy index"),
     query: str = typer.Argument(..., help="Search query"),
     top_k: int = typer.Option(200, "--top-k", "-k", help="How many hits to read over"),
     sources: Optional[str] = typer.Option(None, "--sources", "-s", help="Comma-separated source filter"),
@@ -383,8 +426,12 @@ def pairs(
         score_fmt = lambda s: f"{s:6.1f}"
     else:
         if index_file.is_dir():
-            from emb.index import read_index
-            entries, embeddings, _ = read_index(index_file)
+            if (index_file / "current.json").exists():
+                from emb.generation import read_generation
+                entries, embeddings, _ = read_generation(index_file)
+            else:
+                from emb.index import read_index
+                entries, embeddings, _ = read_index(index_file)
         else:
             with open(index_file) as f:
                 from emb.schema import Entry
@@ -415,10 +462,14 @@ def pairs(
 def _load_entries_only(index_file: Path):
     """Load entries (text + ids) WITHOUT embeddings — for fuzzy pairs (no model needed).
 
-    Split index: read entries.jsonl directly (skip the embeddings.npy mmap). Legacy JSON:
-    parse entries (embedding field ignored)."""
+    Activated generations are fully validated before entries are returned. A legacy split
+    index reads entries.jsonl directly; legacy JSON ignores the embedding field."""
     index_file = Path(index_file)
     if index_file.is_dir():
+        if (index_file / "current.json").exists():
+            from emb.generation import read_generation
+            entries, _, _ = read_generation(index_file)
+            return entries
         from emb.io import read_jsonl
         entries_path = index_file / "entries.jsonl"
         if not entries_path.exists():
@@ -453,24 +504,45 @@ def contextualize(
 
 @app.command()
 def info(
-    index_file: Path = typer.Argument(..., help="Index file (JSON) or directory (split format)"),
+    index_file: Path = typer.Argument(..., help="Generation lane root or legacy index"),
 ):
     """Show index statistics."""
     index_file = Path(index_file)
 
     if index_file.is_dir():
-        meta_path = index_file / 'metadata.json'
-        with open(meta_path, 'r') as f:
-            meta = json.load(f)
-        n_entries = meta.get('total_entries', '?')
-
-        # Show disk size breakdown
-        sizes = {}
-        for child in index_file.iterdir():
-            sizes[child.name] = child.stat().st_size
+        if (index_file / "current.json").exists():
+            from emb.generation import read_generation
+            _, _, meta = read_generation(index_file)
+            generation_path = index_file / "generations" / meta["generation_id"]
+            sizes = {
+                child.name: child.stat().st_size
+                for child in generation_path.iterdir()
+                if child.is_file()
+            }
+            n_entries = meta["entry_count"]
+            model = meta["embedding"]["model"]
+            dim = meta["embedding"]["dimension"]
+            generated = meta["created_at"]
+            source_counts = meta["sources"]["counts"]
+            format_name = f"generation {meta['generation_id']}"
+        else:
+            meta_path = index_file / 'metadata.json'
+            with open(meta_path, 'r') as f:
+                meta = json.load(f)
+            n_entries = meta.get('total_entries', '?')
+            sizes = {
+                child.name: child.stat().st_size
+                for child in index_file.iterdir()
+                if child.is_file()
+            }
+            model = meta.get('embedding_model', 'unknown')
+            dim = meta.get('embedding_dim', 'unknown')
+            generated = meta.get('generated_at', 'unknown')
+            source_counts = meta.get('sources', {})
+            format_name = "split format"
         total = sum(sizes.values())
 
-        console.print(f"\n[bold]Index: {index_file}/ (split format)[/bold]")
+        console.print(f"\n[bold]Index: {index_file}/ ({format_name})[/bold]")
         console.print(f"  Entries: {n_entries}")
         console.print(f"  Total size: {total / 1024 / 1024:.1f} MB")
         for name, size in sorted(sizes.items()):
@@ -483,15 +555,18 @@ def info(
         size_mb = index_file.stat().st_size / 1024 / 1024
         console.print(f"\n[bold]Index: {index_file} (JSON format, {size_mb:.1f} MB)[/bold]")
         console.print(f"  Entries: {n_entries}")
+        model = meta.get('embedding_model', 'unknown')
+        dim = meta.get('embedding_dim', 'unknown')
+        generated = meta.get('generated_at', 'unknown')
+        source_counts = meta.get('sources', {})
 
-    console.print(f"  Model: {meta.get('embedding_model', 'unknown')}")
-    console.print(f"  Dim: {meta.get('embedding_dim', 'unknown')}")
-    console.print(f"  Generated: {meta.get('generated_at', 'unknown')}")
+    console.print(f"  Model: {model}")
+    console.print(f"  Dim: {dim}")
+    console.print(f"  Generated: {generated}")
 
-    sources = meta.get('sources', {})
-    if sources:
+    if source_counts:
         console.print(f"\n  Sources:")
-        for s, count in sorted(sources.items(), key=lambda x: -x[1]):
+        for s, count in sorted(source_counts.items(), key=lambda x: -x[1]):
             console.print(f"    {s}: {count}")
 
 
@@ -532,18 +607,33 @@ def merge(
     all_meta_sources = {}
     model = None
     dim = None
+    recipe_identity = None
 
-    for idx_path in inputs:
+    for input_number, idx_path in enumerate(inputs):
         console.print(f"  Reading {idx_path}...")
         with open(idx_path, 'r') as f:
             data = json.load(f)
 
         meta = data.get('metadata', {})
-        if model is None:
+        current_recipe_identity = json.dumps(
+            meta.get('recipe_id', meta.get('recipe_ids', meta.get('recipes'))),
+            sort_keys=True,
+            separators=(',', ':'),
+        )
+        if input_number == 0:
             model = meta.get('embedding_model')
             dim = meta.get('embedding_dim')
-        elif meta.get('embedding_model') != model:
-            console.print(f"[yellow]Warning: model mismatch in {idx_path} ({meta.get('embedding_model')} vs {model})[/yellow]")
+            recipe_identity = current_recipe_identity
+        elif (
+            meta.get('embedding_model') != model
+            or meta.get('embedding_dim') != dim
+            or current_recipe_identity != recipe_identity
+        ):
+            console.print(
+                f"[red]Incompatible embedding model/dimension/recipe in {idx_path}; "
+                "refusing to merge incomparable vector spaces.[/red]"
+            )
+            raise typer.Exit(1)
 
         for e in data.get('entries', []):
             all_entries.append(e)

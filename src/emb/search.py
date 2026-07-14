@@ -117,9 +117,13 @@ class SearchEngine:
         index_path = Path(index_path)
 
         if index_path.is_dir():
-            # Split format: entries.jsonl + embeddings.npy
-            from emb.index import read_index
-            entries, embeddings, metadata = read_index(index_path)
+            if (index_path / "current.json").exists():
+                from emb.generation import read_generation
+                entries, embeddings, metadata = read_generation(index_path)
+            else:
+                # Pre-generation split format, retained for offline conversion.
+                from emb.index import read_index
+                entries, embeddings, metadata = read_index(index_path)
         else:
             # Legacy monolithic JSON
             with open(index_path, 'r') as f:
@@ -546,29 +550,3 @@ class SearchEngine:
                 out['rerank_score'] = r['rerank_score']
             formatted.append(out)
         return formatted
-
-    def add_index(self, index_path: Path):
-        """Merge another index into this engine (for cross-corpus search)."""
-        index_path = Path(index_path)
-        with open(index_path, 'r') as f:
-            data = json.load(f)
-        new_entries = [Entry.from_dict(e) for e in data['entries']]
-        new_embeddings = np.array([e.embedding for e in new_entries], dtype=np.float32)
-
-        self.entries.extend(new_entries)
-        self.embeddings = np.vstack([self.embeddings, new_embeddings])
-
-        # Re-parse dates for new entries
-        for entry in new_entries:
-            parsed = None
-            if entry.date:
-                try:
-                    parsed = date_parser.parse(str(entry.date), fuzzy=True)
-                    if parsed.tzinfo:
-                        parsed = parsed.replace(tzinfo=None)
-                except Exception:
-                    pass
-            self._parsed_dates.append(parsed)
-
-        # Invalidate FTS cache
-        self._fts_db = None

@@ -1,6 +1,6 @@
 # emb — Maintainer Handoff & Architecture
 
-**Last updated:** 2026-06-11 eve (rerank program DONE — rerank is opt-in-after-eval, default reranker gte @96bc8e8; bakeoff audited to /eval standard, invariant claims in EXPERIMENT.md §6b; external positioning memo added; phenome eval is the open item) · **Audience:** the next agent/maintainer of `emb` and its consumers.
+**Last updated:** 2026-07-15 (immutable generation publication/activation is the production write path; mutable split indexes remain conversion inputs) · **Audience:** the next agent/maintainer of `emb` and its consumers.
 **Stance:** breaking changes welcome; no backward-compat shims, no legacy wrappers. Keep the
 representation deep and the surface small. This doc is living — update it when the design moves.
 
@@ -29,8 +29,9 @@ EmbeddingEngine(embed.py)       # backends: sentence-transformers (gte, local) �
    │   ├─ _l2_normalize()       # CENTRAL INVARIANT: every vector emb returns is unit-norm, all backends
    │   └─ EmbeddingCache        # content-hash → vector; incremental; namespaced by model_slug (space safety)
    │
-Split index (index.py)          # dir/ = entries.jsonl + embeddings.npy (mmap) + metadata.json
-   │                            # legacy monolithic JSON is READ-only via `emb convert`; embed never writes it
+Generation (generation.py)     # generations/<id>/{generation.json, entries.jsonl, embeddings.npy}
+   │                            # validated immutable payload + atomic current.json activation
+   │                            # mutable split/monolithic JSON are conversion inputs; embed never writes them
 SearchEngine(search.py)
    │   ├─ dense                 # brute-force  sims = E @ q  (exact; ~5ms at 72K; NO ANN until >500K)
    │   ├─ filter BEFORE rank    # sources/entry_filter/min_sim/since build `valid` pre-ranking (exact)
@@ -50,6 +51,7 @@ pairs (pairs.py)                # `emb pairs`: all-pairs similarity, upper-trian
 3. **Filters run BEFORE ranking** (`search.py` builds `valid` first). Dense is exact at this scale. The ONLY truncation surface is the BM25 leg — fixed by the json_each rowid pushdown. (phenome's old `fetch_k=top_k*5` "fix" was deleted; it rested on a wrong "filter runs post-retrieval" comment.)
 4. **Query encoding routes through the index's backend** (`_encode_query` reads `metadata['embedding_model']`). Unknown model → hard error, never a silent default into a foreign space.
 5. **FTS rowid == entry enumerate index** — the pushdown's `rowid IN (valid)` relies on this; documented at `_bm25_search`.
+6. **`generation.json` is the only live index authority.** It binds ordered IDs/entries, source manifest, vector bytes, shape/dtype/finiteness, model, and full recipe identity. Readers resolve `current.json` once and reject malformed/traversal/building pointers or any digest/recipe disagreement.
 
 ---
 

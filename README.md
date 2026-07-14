@@ -13,7 +13,7 @@ uv tool install git+https://github.com/markusstrasser/emb
 ## CLI
 
 ```bash
-# Embed JSONL into a searchable index (split format: JSONL + mmap numpy)
+# Embed JSONL into an immutable generation and atomically activate it
 emb embed input.jsonl -o my_index/
 
 # Search
@@ -38,8 +38,9 @@ emb convert legacy.json split_dir/    # JSON → split
 emb convert split_dir/ output.json    # split → JSON
 ```
 
-`emb embed` always writes the split format. Multimodal indexes (gemini backend) are
-built via the Python API (`EmbeddingEngine.embed_media`); see below.
+`emb embed` writes an immutable generation under `generations/` and atomically
+activates it through `current.json`. Multimodal indexes (gemini backend) are built
+via the Python API (`EmbeddingEngine.embed_media`); see below.
 
 ### Input format
 
@@ -57,7 +58,7 @@ Required: `id`, `text`. Optional: `source`, `title`, `date`, `metadata` (dict).
 ```python
 from emb.search import SearchEngine
 
-# Load from split index directory
+# Load the active, validated generation
 engine = SearchEngine("my_index/")
 
 # Basic search
@@ -110,7 +111,38 @@ groups = {"health": {"research", "docs", "healthkit"}}
 sources = expand_sources({"health"}, groups)  # → {"research", "docs", "healthkit"}
 ```
 
-### Split index format
+### Immutable generation format
+
+```python
+from emb import read_generation, write_generation
+from emb.generation import default_text_recipe
+
+generation = write_generation(
+    "my_index/", entries, embeddings,
+    generation_id="20260715T120000Z",
+    lane="text",
+    embedding_model="Alibaba-NLP/gte-modernbert-base",
+    recipes=[default_text_recipe("Alibaba-NLP/gte-modernbert-base", 768)],
+    source_manifest={"fingerprints": {"docs": "sha256:..."}},
+    generator={
+        "app_git_commit": "...",
+        "emb_git_commit": "...",
+        "generator_version": "personal-text-v1",
+    },
+)
+
+# Resolves current.json once, validates every digest/shape/recipe invariant,
+# and pins one immutable generation.
+entries, embeddings, manifest = read_generation("my_index/")
+```
+
+`generation.json` is the sole metadata authority. Writers stage
+`<generation-id>.building` beside the final directory, fsync and validate it,
+then atomically publish and activate it. `current.json` contains only the safe
+generation ID and expected manifest digest. Activation of a prior generation is
+an instant rollback; failed builds never alter the active pointer.
+
+### Legacy split index conversion API
 
 ```python
 from emb.index import write_index, read_index, check_staleness
@@ -142,15 +174,18 @@ entries = engine.embed_entries(entries, cache=cache, checkpoint_dir="cache_dir/"
 
 ## Index formats
 
-**Split (default, recommended):**
+**Generation (default):**
 ```
 my_index/
-  metadata.json      # model, dim, sources, generated_at
-  entries.jsonl       # one JSON per line (no embeddings)
-  embeddings.npy      # float32 (N × dim), mmap-able
+  generations/<generation-id>/
+    generation.json   # sole identity, recipe, provenance, and digest authority
+    entries.jsonl     # one JSON per line (no embeddings)
+    embeddings.npy    # float32 (N × dim), mmap-able
+  current.json        # atomically replaced activation pointer
 ```
 
-**JSON (legacy):** Single file with entries + embeddings inline. Read-only via `emb convert` / `SearchEngine`; `emb embed` no longer writes it (4x larger, can't be mmap'd).
+**Split/JSON (legacy):** Offline conversion inputs retained by `emb convert` and
+legacy readers. `emb embed` no longer writes either mutable format.
 
 ## Multimodal (Gemini Embedding 2)
 

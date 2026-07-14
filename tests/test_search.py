@@ -348,58 +348,6 @@ def test_sort_by_date_clamps_future(tmp_path):
     assert results[2]['id'] == 'old'
 
 
-def test_add_index_merges(tmp_path):
-    path1 = _make_index([
-        {'id': 'a', 'text': 'first index', 'source': 'src1'},
-    ], tmp_path / 'idx1')
-    path2 = _make_index([
-        {'id': 'b', 'text': 'second index', 'source': 'src2'},
-    ], tmp_path / 'idx2')
-
-    engine = SearchEngine(path1)
-    assert len(engine.entries) == 1
-    engine.add_index(path2)
-    assert len(engine.entries) == 2
-    assert engine.embeddings.shape[0] == 2
-
-
-def test_add_index_searchable(tmp_path):
-    """After add_index, new entries should be searchable."""
-    path1 = _make_index([
-        {'id': 'a', 'text': 'first index', 'source': 'src1', 'embedding': [0, 0, 0, 1]},
-    ], tmp_path / 'idx1')
-    path2 = _make_index([
-        {'id': 'b', 'text': 'second index', 'source': 'src2', 'embedding': [1, 0, 0, 0]},
-    ], tmp_path / 'idx2')
-
-    engine = SearchEngine(path1)
-    engine.add_index(path2)
-    engine._encode_query = lambda q: np.array([1, 0, 0, 0], dtype=np.float32)
-
-    results = engine.search("test")
-    assert results[0]['id'] == 'b'  # closer in dense space
-
-
-def test_add_index_invalidates_fts(tmp_path):
-    """After add_index, FTS index should include new entries."""
-    path1 = _make_index([
-        {'id': 'a', 'text': 'apple banana cherry', 'source': 'src1'},
-    ], tmp_path / 'idx1')
-    path2 = _make_index([
-        {'id': 'b', 'text': 'dragon elephant frog', 'source': 'src2'},
-    ], tmp_path / 'idx2')
-
-    engine = SearchEngine(path1)
-    # Force FTS build
-    engine._ensure_fts_index()
-    engine.add_index(path2)
-    engine._encode_query = lambda q: np.random.randn(4).astype(np.float32)
-
-    results = engine.search("dragon elephant", hybrid=True)
-    ids = {r['id'] for r in results}
-    assert 'b' in ids
-
-
 def test_search_result_format(tmp_path):
     path = _make_index([
         {'id': 'x', 'text': 'hello world', 'source': 'test', 'title': 'Test Entry', 'date': '2024-01-01'},
