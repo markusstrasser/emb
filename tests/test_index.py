@@ -197,3 +197,45 @@ def test_metadata_includes_sources(tmp_path):
     assert meta['sources']['src_a'] == 5
     assert meta['sources']['src_b'] == 5
     assert meta['total_entries'] == 10
+
+
+def test_flat_split_dir_resolves_to_itself(tmp_path):
+    """A flat split index must keep working unchanged — resolution is additive."""
+    from emb.index import resolve_index_dir
+
+    entries, embeddings = _make_entries(4)
+    idx_dir = tmp_path / 'flat'
+    write_index(entries, embeddings, idx_dir)
+
+    resolved, synthesized = resolve_index_dir(idx_dir)
+    assert resolved == idx_dir
+    assert synthesized is None, "flat layout must read its own metadata.json, not a projection"
+
+
+def test_generation_manifest_projects_onto_metadata_shape():
+    """Regression: `emb convert` could not read anything `emb embed` writes.
+
+    Generation-layout lanes describe payloads in generation.json and deliberately omit
+    metadata.json (test_generation.py asserts that absence), but read_index only ever opened
+    metadata.json — so every generation-layout lane raised FileNotFoundError on convert.
+    Downstream (arc-agi, 2026-07-25) this silently disabled a semantic-search layer for a
+    full working session. The projection below is what lets metadata.json-only readers serve
+    generation lanes; if the manifest schema moves, this test is the tripwire.
+    """
+    from emb.index import _metadata_from_generation
+
+    manifest = {
+        'entry_count': 5033,
+        'embedding': {'dimension': 768, 'dtype': 'float32',
+                      'model': 'Alibaba-NLP/gte-modernbert-base', 'shape': [5033, 768]},
+        'sources': {'counts': {'research': 1056, 'backlog': 981}, 'ids': ['research', 'backlog']},
+        'created_at': '2026-07-24T07:29:37.790165+00:00',
+        'generation_id': '20260724T072936.395854Z',
+    }
+    meta = _metadata_from_generation(manifest)
+    assert meta['total_entries'] == 5033
+    assert meta['embedding_dim'] == 768
+    assert meta['embedding_model'] == 'Alibaba-NLP/gte-modernbert-base'
+    assert meta['sources'] == {'research': 1056, 'backlog': 981}, "counts, not the ids list"
+    assert meta['generated_at'] == '2026-07-24T07:29:37.790165+00:00'
+    assert meta['generation_id'] == '20260724T072936.395854Z'

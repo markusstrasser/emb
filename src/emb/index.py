@@ -63,22 +63,68 @@ def write_index(entries: List[Entry], embeddings: np.ndarray,
     np.save(path / 'embeddings.npy', embeddings.astype(np.float32))
 
 
+def _metadata_from_generation(manifest: Dict) -> Dict:
+    """Project a generation manifest onto the flat metadata.json shape.
+
+    The two describe the same payload under different names, so readers that only speak
+    metadata.json can serve generation-layout lanes without duplicating the schema.
+    """
+    emb_meta = manifest.get('embedding') or {}
+    srcs = manifest.get('sources') or {}
+    return {
+        'total_entries': manifest.get('entry_count'),
+        'embedding_dim': emb_meta.get('dimension'),
+        'embedding_model': emb_meta.get('model'),
+        'sources': srcs.get('counts', srcs),
+        'generated_at': manifest.get('created_at'),
+        'generation_id': manifest.get('generation_id'),
+    }
+
+
+def resolve_index_dir(path: Path) -> Tuple[Path, Optional[Dict]]:
+    """Resolve a lane root to the directory actually holding entries/embeddings.
+
+    A flat split index carries metadata.json beside its payloads. A generation-layout lane
+    (current.json + generations/<id>/) keeps payloads in the ACTIVE generation and describes
+    them in generation.json — deliberately never metadata.json (tests/test_generation.py
+    asserts its absence). Readers must therefore resolve the pointer rather than assume the
+    flat layout, or every generation-layout lane is unreadable to them.
+
+    Returns (payload_dir, synthesized_metadata_or_None).
+    """
+    path = Path(path)
+    if (path / 'metadata.json').is_file():
+        return path, None
+    if (path / 'current.json').is_file() and (path / 'generations').is_dir():
+        from emb.generation import _resolve_active_generation
+        gen_path, _digest, manifest = _resolve_active_generation(path)
+        return gen_path, _metadata_from_generation(manifest)
+    return path, None
+
+
 def read_index(path: Path, sources: Optional[Set[str]] = None,
                mmap: bool = True) -> Tuple[List[Entry], np.ndarray, Dict]:
     """Read split index. Optional source filtering + mmap for zero-copy embeddings.
 
+    Accepts either a flat split directory or a generation-layout lane root; the latter is
+    resolved to its active generation.
+
     Args:
-        path: Directory containing metadata.json, entries.jsonl, embeddings.npy.
+        path: Split directory (metadata.json + payloads), or a lane root (current.json +
+            generations/).
         sources: If provided, only load entries from these sources.
         mmap: If True, memory-map the embeddings (zero-copy, OS pages on demand).
 
     Returns:
         (entries, embeddings, metadata) tuple.
     """
-    path = Path(path)
+    path, gen_metadata = resolve_index_dir(Path(path))
 
-    with open(path / 'metadata.json', 'r') as f:
-        metadata = json.load(f)
+    if gen_metadata is not None:
+        metadata = gen_metadata
+    else:
+        with open(path / 'metadata.json', 'r') as f:
+            metadata = json.load(f)
 
     # Load embeddings
     mmap_mode = 'r' if mmap else None
