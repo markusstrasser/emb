@@ -68,7 +68,7 @@ async def contextualize_entry(entry: Entry, model: str, client) -> Entry:
 
 async def contextualize_batch(
     entries: List[Entry],
-    model: str = "gemini-2.0-flash",
+    model: str = "gemini-3.8-flash",
     concurrency: int = 10,
     client=None,
 ) -> List[Entry]:
@@ -76,7 +76,7 @@ async def contextualize_batch(
 
     Args:
         entries: Entries to contextualize.
-        model: Gemini model name (e.g. "gemini-2.0-flash")
+        model: Gemini model name (e.g. "gemini-3.8-flash")
         concurrency: Max parallel LLM calls.
         client: google.genai.Client instance (created if not provided)
     """
@@ -119,7 +119,7 @@ async def contextualize_batch(
 
 def contextualize_sync(
     entries: List[Entry],
-    model: str = "gemini-2.0-flash",
+    model: str = "gemini-3.8-flash",
     concurrency: int = 10,
     client=None,
 ) -> List[Entry]:

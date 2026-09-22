@@ -486,7 +486,7 @@ def _load_entries_only(index_file: Path):
 def contextualize(
     input_file: str = typer.Argument(..., help="JSONL input file"),
     output_file: str = typer.Argument(..., help="JSONL output file"),
-    model: str = typer.Option("gemini-2.0-flash", "--model", "-m", help="Gemini model name"),
+    model: str = typer.Option("gemini-3.8-flash", "--model", "-m", help="Gemini model name"),
     concurrency: int = typer.Option(10, "--concurrency", "-c", help="Max parallel LLM calls"),
 ):
     """Add LLM-generated context to entries (Anthropic's Contextual Retrieval)."""
