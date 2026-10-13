@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -592,6 +593,47 @@ def activate_generation(lane_root: Path, generation_id: str) -> dict[str, Any]:
     os.replace(temp_path, lane_root / "current.json")
     _fsync_directory(lane_root)
     return pointer
+
+
+def prune_generations(lane_root: Path, *, keep_inactive: int) -> list[str]:
+    """Delete all but the newest ``keep_inactive`` inactive generations.
+
+    The active generation is never a candidate.  Staging directories and
+    directories without a readable manifest are left alone: pruning removes
+    only what it can identify as a complete, superseded generation.  Readers
+    that already pinned a pruned generation keep their open file handles.
+    Returns the deleted generation IDs, oldest first.
+    """
+
+    if keep_inactive < 0:
+        raise ValueError("keep_inactive must be nonnegative")
+    lane_root = Path(lane_root)
+    active_id, _ = _pointer(lane_root)
+    inactive: list[tuple[str, str]] = []
+    for path in (lane_root / "generations").iterdir():
+        if path.is_symlink() or not path.is_dir() or path.name == active_id:
+            continue
+        if not _GENERATION_ID_RE.fullmatch(path.name) or path.name.endswith(
+            ".building"
+        ):
+            continue
+        try:
+            manifest, _ = _load_manifest(path)
+        except GenerationError:
+            continue
+        created_at = manifest.get("created_at")
+        if manifest.get("generation_id") != path.name or not isinstance(
+            created_at, str
+        ):
+            continue
+        inactive.append((created_at, path.name))
+    inactive.sort(reverse=True)
+    doomed = sorted(inactive[keep_inactive:])
+    for _, generation_id in doomed:
+        shutil.rmtree(lane_root / "generations" / generation_id)
+    if doomed:
+        _fsync_directory(lane_root / "generations")
+    return [generation_id for _, generation_id in doomed]
 
 
 def write_generation(

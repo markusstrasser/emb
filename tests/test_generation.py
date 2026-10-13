@@ -19,9 +19,11 @@ from emb.generation import (
     ManifestValidationError,
     PayloadDigestMismatchError,
     PointerMalformedError,
+    PointerNotFoundError,
     RecipeMismatchError,
     UnsafeGenerationIdError,
     activate_generation,
+    prune_generations,
     read_active_manifest,
     read_generation,
     validate_generation,
@@ -286,6 +288,27 @@ def test_pointer_rollback_selects_previous_generation(tmp_path):
     assert [entry.id for entry in read_generation(tmp_path)[0]] == ["new-1", "new-2"]
     activate_generation(tmp_path, "g1")
     assert [entry.id for entry in read_generation(tmp_path)[0]] == ["old-1", "old-2"]
+
+
+def test_prune_keeps_active_and_newest_inactive(tmp_path):
+    for index in range(1, 6):
+        _write(tmp_path, f"g{index}", f"p{index}")
+    activate_generation(tmp_path, "g2")
+    (tmp_path / "generations" / "g9.building").mkdir()
+    (tmp_path / "generations" / "unknown").mkdir()
+
+    assert prune_generations(tmp_path, keep_inactive=2) == ["g1", "g3"]
+    remaining = sorted(path.name for path in (tmp_path / "generations").iterdir())
+    assert remaining == ["g2", "g4", "g5", "g9.building", "unknown"]
+    assert [entry.id for entry in read_generation(tmp_path)[0]] == ["p2-1", "p2-2"]
+    assert prune_generations(tmp_path, keep_inactive=0) == ["g4", "g5"]
+
+
+def test_prune_requires_valid_pointer(tmp_path):
+    _write(tmp_path, "g1", activate=False)
+    with pytest.raises(PointerNotFoundError):
+        prune_generations(tmp_path, keep_inactive=0)
+    assert (tmp_path / "generations" / "g1").is_dir()
 
 
 @pytest.mark.parametrize("generation_id", ["../escape", "a/b", "g1.building", ".."])
